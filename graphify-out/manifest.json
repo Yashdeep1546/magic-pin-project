@@ -1,0 +1,92 @@
+{
+  "dataset/categories/dentists.json": {
+    "mtime": 1777453947.0,
+    "seen": 1790445356.948571,
+    "ast_hash": "55840ff5c1f77ba19eba4153d1ddc719",
+    "semantic_hash": "55840ff5c1f77ba19eba4153d1ddc719"
+  },
+  "dataset/categories/gyms.json": {
+    "mtime": 1777453947.0,
+    "seen": 1790445356.9485748,
+    "ast_hash": "1be5082f7b9376432ca5c80e2174b489",
+    "semantic_hash": "1be5082f7b9376432ca5c80e2174b489"
+  },
+  "dataset/categories/pharmacies.json": {
+    "mtime": 1777453947.0,
+    "seen": 1790445356.9485765,
+    "ast_hash": "9d69ca3a36e2a1587f85a68caf3e1979",
+    "semantic_hash": "9d69ca3a36e2a1587f85a68caf3e1979"
+  },
+  "dataset/categories/restaurants.json": {
+    "mtime": 1777453947.0,
+    "seen": 1790445356.9485772,
+    "ast_hash": "78ea2715224e096ee54972295dbb1efd",
+    "semantic_hash": "78ea2715224e096ee54972295dbb1efd"
+  },
+  "dataset/categories/salons.json": {
+    "mtime": 1777453947.0,
+    "seen": 1790445356.9485781,
+    "ast_hash": "85b8e601f0b18bcd233a1390f6afc98c",
+    "semantic_hash": "85b8e601f0b18bcd233a1390f6afc98c"
+  },
+  "dataset/customers_seed.json": {
+    "mtime": 1777453947.0,
+    "seen": 1790445356.9485788,
+    "ast_hash": "dc103890ee3718a137844be1ffa3ea57",
+    "semantic_hash": "dc103890ee3718a137844be1ffa3ea57"
+  },
+  "dataset/generate_dataset.py": {
+    "mtime": 1777453947.0,
+    "seen": 1790445356.9485795,
+    "ast_hash": "ac20c408f42bc44fa79deeaefdaab7ed",
+    "semantic_hash": "ac20c408f42bc44fa79deeaefdaab7ed"
+  },
+  "dataset/merchants_seed.json": {
+    "mtime": 1777453947.0,
+    "seen": 1790445356.94858,
+    "ast_hash": "656ba58f1d3c8d6781f326c92fd08222",
+    "semantic_hash": "656ba58f1d3c8d6781f326c92fd08222"
+  },
+  "dataset/triggers_seed.json": {
+    "mtime": 1777453947.0,
+    "seen": 1790445356.948581,
+    "ast_hash": "1151506fe0682a7b373ddd06fe3685ec",
+    "semantic_hash": "1151506fe0682a7b373ddd06fe3685ec"
+  },
+  "judge_simulator.py": {
+    "mtime": 1777453947.0,
+    "seen": 1790445356.9485815,
+    "ast_hash": "d4671bf3ea9ba1611e54a3758e1366ef",
+    "semantic_hash": "d4671bf3ea9ba1611e54a3758e1366ef"
+  },
+  "magicpin-bot/app/config.py": {
+    "mtime": 1790445323.6035185,
+    "seen": 1790445356.9485822,
+    "ast_hash": "ecf3c8f5842e3ab620548807cea52e84",
+    "semantic_hash": "ecf3c8f5842e3ab620548807cea52e84"
+  },
+  "challenge-brief.md": {
+    "mtime": 1777453962.0,
+    "seen": 1790445356.948583,
+    "ast_hash": "309d3b9ad89ef02ae6beae5a53a17be0",
+    "semantic_hash": "309d3b9ad89ef02ae6beae5a53a17be0"
+  },
+  "challenge-testing-brief.md": {
+    "mtime": 1777453947.0,
+    "seen": 1790445356.9485836,
+    "ast_hash": "1aede06bd8902a81f74ef88e218f292c",
+    "semantic_hash": "1aede06bd8902a81f74ef88e218f292c"
+  },
+  "engagement-design.md": {
+    "mtime": 1777453947.0,
+    "seen": 1790445356.9485846,
+    "ast_hash": "96063a4a830b7baf6819cb5cb1f5b322",
+    "semantic_hash": "96063a4a830b7baf6819cb5cb1f5b322"
+  },
+  "engagement-research.md": {
+    "mtime": 1777453947.0,
+    "seen": 1790445356.9485853,
+    "ast_hash": "a63aef4ce61e8b570233455e408dc5fd",
+    "semantic_hash": "a63aef4ce61e8b570233455e408dc5fd"
+  }
+}

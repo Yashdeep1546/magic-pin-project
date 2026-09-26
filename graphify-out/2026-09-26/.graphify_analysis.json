@@ -1,0 +1,260 @@
+{
+  "communities": {
+    "0": [
+      "argparse",
+      "dataset_generate_dataset",
+      "dataset_generate_dataset_expand_customers",
+      "dataset_generate_dataset_expand_merchants",
+      "dataset_generate_dataset_expand_triggers",
+      "dataset_generate_dataset_load_seeds",
+      "dataset_generate_dataset_main",
+      "dataset_generate_dataset_py_path",
+      "dataset_generate_dataset_rationale_119",
+      "dataset_generate_dataset_rationale_168",
+      "dataset_generate_dataset_rationale_2",
+      "dataset_generate_dataset_rationale_205",
+      "dataset_generate_dataset_rationale_268",
+      "dataset_generate_dataset_write_outputs",
+      "dataset_generate_dataset_write_test_pairs",
+      "json",
+      "os",
+      "pathlib",
+      "random"
+    ],
+    "1": [
+      "judge_simulator_judgesimulator",
+      "judge_simulator_judgesimulator_all",
+      "judge_simulator_judgesimulator_auto_reply",
+      "judge_simulator_judgesimulator_final_summary",
+      "judge_simulator_judgesimulator_full",
+      "judge_simulator_judgesimulator_hostile",
+      "judge_simulator_judgesimulator_intent",
+      "judge_simulator_judgesimulator_phase2_short",
+      "judge_simulator_judgesimulator_run",
+      "judge_simulator_judgesimulator_warmup",
+      "judge_simulator_main",
+      "judge_simulator_print_fail",
+      "judge_simulator_print_header",
+      "judge_simulator_print_info",
+      "judge_simulator_print_section",
+      "judge_simulator_print_success",
+      "judge_simulator_print_warn"
+    ],
+    "2": [
+      "dataclasses",
+      "datetime",
+      "judge_simulator",
+      "judge_simulator_colors",
+      "judge_simulator_judgesimulator_score_and_display",
+      "judge_simulator_print_hint",
+      "judge_simulator_print_reason",
+      "judge_simulator_print_score_bar",
+      "judge_simulator_rationale_2",
+      "judge_simulator_rationale_834",
+      "re",
+      "socket",
+      "sys",
+      "time",
+      "urllib"
+    ],
+    "3": [
+      "judge_simulator_botclient",
+      "judge_simulator_botclient_healthz",
+      "judge_simulator_botclient_init",
+      "judge_simulator_botclient_metadata",
+      "judge_simulator_botclient_push_context",
+      "judge_simulator_botclient_reply",
+      "judge_simulator_botclient_request",
+      "judge_simulator_botclient_tick",
+      "judge_simulator_datasetloader",
+      "judge_simulator_datasetloader_init",
+      "judge_simulator_datasetloader_load",
+      "judge_simulator_judgesimulator_init",
+      "judge_simulator_py_path"
+    ],
+    "4": [
+      "judge_simulator_llmscorer",
+      "judge_simulator_llmscorer_fallback_score",
+      "judge_simulator_llmscorer_init",
+      "judge_simulator_llmscorer_parse_response",
+      "judge_simulator_llmscorer_score",
+      "judge_simulator_print_llm",
+      "judge_simulator_rationale_441",
+      "judge_simulator_rationale_500",
+      "judge_simulator_rationale_541",
+      "judge_simulator_rationale_567",
+      "judge_simulator_scoreresult",
+      "judge_simulator_scoreresult_total"
+    ],
+    "5": [
+      "basesettings",
+      "magicpin_bot_app_config",
+      "magicpin_bot_app_config_settings",
+      "pydantic_settings",
+      "typing"
+    ],
+    "6": [
+      "challenge_brief_category_context",
+      "challenge_brief_compose",
+      "challenge_brief_customer_context",
+      "challenge_brief_merchant_context",
+      "challenge_brief_trigger_context"
+    ],
+    "7": [
+      "abc",
+      "judge_simulator_llmprovider",
+      "judge_simulator_llmprovider_complete",
+      "judge_simulator_llmprovider_name"
+    ],
+    "8": [
+      "challenge_testing_brief_context_endpoint",
+      "challenge_testing_brief_harness",
+      "challenge_testing_brief_reply_endpoint",
+      "challenge_testing_brief_tick_endpoint"
+    ],
+    "9": [
+      "judge_simulator_anthropicprovider",
+      "judge_simulator_anthropicprovider_complete",
+      "judge_simulator_anthropicprovider_init",
+      "judge_simulator_anthropicprovider_name"
+    ],
+    "10": [
+      "judge_simulator_deepseekprovider",
+      "judge_simulator_deepseekprovider_complete",
+      "judge_simulator_deepseekprovider_init",
+      "judge_simulator_deepseekprovider_name"
+    ],
+    "11": [
+      "judge_simulator_geminiprovider",
+      "judge_simulator_geminiprovider_complete",
+      "judge_simulator_geminiprovider_init",
+      "judge_simulator_geminiprovider_name"
+    ],
+    "12": [
+      "judge_simulator_groqprovider",
+      "judge_simulator_groqprovider_complete",
+      "judge_simulator_groqprovider_init",
+      "judge_simulator_groqprovider_name"
+    ],
+    "13": [
+      "judge_simulator_ollamaprovider",
+      "judge_simulator_ollamaprovider_complete",
+      "judge_simulator_ollamaprovider_init",
+      "judge_simulator_ollamaprovider_name"
+    ],
+    "14": [
+      "judge_simulator_openaiprovider",
+      "judge_simulator_openaiprovider_complete",
+      "judge_simulator_openaiprovider_init",
+      "judge_simulator_openaiprovider_name"
+    ],
+    "15": [
+      "judge_simulator_openrouterprovider",
+      "judge_simulator_openrouterprovider_complete",
+      "judge_simulator_openrouterprovider_init",
+      "judge_simulator_openrouterprovider_name"
+    ],
+    "16": [
+      "challenge_brief_vera",
+      "engagement_design_framework"
+    ],
+    "17": [
+      "engagement_research_aryan",
+      "engagement_research_vera_mcp"
+    ],
+    "18": [
+      "judge_simulator_create_provider",
+      "judge_simulator_rationale_329"
+    ]
+  },
+  "cohesion": {
+    "0": 0.17543859649122806,
+    "1": 0.36764705882352944,
+    "2": 0.1523809523809524,
+    "3": 0.21794871794871795,
+    "4": 0.24242424242424243,
+    "5": 0.4,
+    "6": 0.4,
+    "7": 0.5,
+    "8": 0.5,
+    "9": 0.5,
+    "10": 0.5,
+    "11": 0.5,
+    "12": 0.5,
+    "13": 0.5,
+    "14": 0.5,
+    "15": 0.5,
+    "16": 1.0,
+    "17": 1.0,
+    "18": 1.0
+  },
+  "gods": [
+    {
+      "id": "judge_simulator_llmprovider",
+      "label": "LLMProvider",
+      "degree": 14
+    },
+    {
+      "id": "judge_simulator_create_provider",
+      "label": "create_provider()",
+      "degree": 13
+    },
+    {
+      "id": "judge_simulator_judgesimulator",
+      "label": "JudgeSimulator",
+      "degree": 13
+    },
+    {
+      "id": "judge_simulator_print_fail",
+      "label": "print_fail()",
+      "degree": 11
+    },
+    {
+      "id": "judge_simulator_print_info",
+      "label": "print_info()",
+      "degree": 10
+    },
+    {
+      "id": "judge_simulator_print_section",
+      "label": "print_section()",
+      "degree": 9
+    },
+    {
+      "id": "judge_simulator_botclient",
+      "label": "BotClient",
+      "degree": 9
+    },
+    {
+      "id": "judge_simulator_print_warn",
+      "label": "print_warn()",
+      "degree": 8
+    },
+    {
+      "id": "dataset_generate_dataset_main",
+      "label": "main()",
+      "degree": 7
+    },
+    {
+      "id": "judge_simulator_print_success",
+      "label": "print_success()",
+      "degree": 7
+    }
+  ],
+  "surprises": [
+    {
+      "source": "4-Context Composition Framework",
+      "target": "Vera (Merchant AI Assistant)",
+      "source_files": [
+        "engagement-design.md",
+        "challenge-brief.md"
+      ],
+      "confidence": "INFERRED",
+      "relation": "implements",
+      "why": "inferred connection - not explicitly stated in source; connects across different repos/directories"
+    }
+  ],
+  "tokens": {
+    "input": 35933,
+    "output": 2085
+  }
+}

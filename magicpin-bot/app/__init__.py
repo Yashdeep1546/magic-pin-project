@@ -1,0 +1,1 @@
+"""Magicpin Vera Bot package."""
