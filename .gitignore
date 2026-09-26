@@ -2,9 +2,32 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+env/
+ENV/
+
+# Environment files with secrets
 .env
+.env.local
+.env.*.local
+*.env
+
+# Testing, coverage & caches
 .pytest_cache/
 .coverage
 htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Scratch and ad-hoc verification scripts
+scratch/
+*scratch*
+*test_gemini*
+*verify_live*
+
+# IDE & Editor files
+.vscode/
+.idea/
 *.swp
 *.swo
+.DS_Store
+Thumbs.db

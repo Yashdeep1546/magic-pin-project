@@ -4,8 +4,11 @@ __pycache__/
 *$py.class
 *.so
 
-# Environment variables
+# Environment variables with real secrets
 .env
+.env.local
+.env.*.local
+*.env
 
 # Virtual environments
 venv/
@@ -19,6 +22,12 @@ ENV/
 htmlcov/
 .mypy_cache/
 .ruff_cache/
+
+# Scratch and ad-hoc test scripts
+scratch/
+*scratch*
+*test_gemini*
+*verify_live*
 
 # IDE & Editor files
 .vscode/
