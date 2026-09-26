@@ -39,7 +39,7 @@ Rules:
 3. Mention the strongest selected signal.
 4. Make the message specific to this merchant.
 5. Match the category voice.
-6. Give exactly ONE CTA.
+6. Give exactly ONE CTA ending with a question mark (e.g. 'Should we send this now?').
 7. Keep the ask easy to answer.
 8. Do not mention internal reasoning.
 9. Do not repeat previous messages.
@@ -200,31 +200,46 @@ def build_compact_context(
 # ---------------------------------------------------------------------------
 def _default_llm_call(prompt: str, system: str, timeout: float = LLM_TIMEOUT_SECONDS) -> str:
     """
-    Default HTTP client calling OpenAI-compatible chat completions if API key configured.
-    Falls back gracefully if no API key is present.
+    Default HTTP client calling Gemini or OpenAI chat completions if API key configured.
+    Falls back gracefully if no API key is present or during unit test runner.
     """
+    # Prevent accidental external network calls and latency spikes during automated pytest execution
+    if os.environ.get("PYTEST_CURRENT_TEST") and not os.environ.get("ENABLE_LIVE_LLM_TESTS"):
+        raise ValueError("Live LLM calls disabled during pytest execution.")
+
     gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
     openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
     llm_key = os.environ.get("LLM_API_KEY", "").strip()
 
-    # Valid Gemini API keys from Google AI Studio start with AIza
-    valid_gemini_key = gemini_key if (gemini_key.startswith("AIza") or os.environ.get("LLM_PROVIDER") == "gemini") else None
+    # Prefer Gemini if GEMINI_API_KEY is configured
+    if gemini_key:
+        model = os.environ.get("LLM_MODEL", "gemini-3.5-flash-lite")
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={gemini_key}"
+        payload = {
+            "system_instruction": {"parts": [{"text": system}]},
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.2,
+                "responseMimeType": "application/json",
+            },
+        }
+        req = urlrequest.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlrequest.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data["candidates"][0]["content"]["parts"][0]["text"]
 
-    api_key = valid_gemini_key or openai_key or llm_key
+    # Otherwise fallback to OpenAI-compatible provider if key configured
+    api_key = openai_key or llm_key
     if not api_key:
         raise ValueError("No LLM API key configured.")
 
-    is_gemini = bool(valid_gemini_key) or os.environ.get("LLM_PROVIDER") == "gemini"
-    default_base_url = (
-        "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-        if is_gemini
-        else "https://api.openai.com/v1/chat/completions"
-    )
-    default_model = "gemini-1.5-flash" if is_gemini else (settings.MODEL or "gpt-4o")
-
-    base_url = os.environ.get("LLM_BASE_URL", default_base_url)
-    model = os.environ.get("LLM_MODEL", default_model)
-
+    base_url = os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1/chat/completions")
+    model = os.environ.get("LLM_MODEL", settings.MODEL or "gpt-4o")
     payload = {
         "model": model,
         "messages": [
@@ -234,7 +249,6 @@ def _default_llm_call(prompt: str, system: str, timeout: float = LLM_TIMEOUT_SEC
         "temperature": 0.2,
         "response_format": {"type": "json_object"},
     }
-
     req = urlrequest.Request(
         base_url,
         data=json.dumps(payload).encode("utf-8"),
@@ -244,7 +258,6 @@ def _default_llm_call(prompt: str, system: str, timeout: float = LLM_TIMEOUT_SEC
         },
         method="POST",
     )
-
     with urlrequest.urlopen(req, timeout=timeout) as resp:
         data = json.loads(resp.read().decode("utf-8"))
         return data["choices"][0]["message"]["content"]
@@ -292,6 +305,11 @@ def compose_message(
         if not body or not isinstance(body, str) or not body.strip():
             logger.warning("LLM response missing 'body'; using deterministic fallback.")
             return fallback_data
+
+        body = body.strip()
+        cta_val = data.get("cta")
+        if cta_val and isinstance(cta_val, str) and cta_val.strip() and "?" not in body:
+            body = f"{body} {cta_val.strip()}"
 
         # Grounding validation against evidence ledger
         ledger = build_evidence_ledger(compact_context)
