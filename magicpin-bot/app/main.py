@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import time
 import uuid
 from datetime import datetime, timezone
@@ -207,7 +208,7 @@ async def metadata():
     return MetadataResponse(
         team_name=settings.TEAM_NAME,
         team_members=settings.TEAM_MEMBERS,
-        model=settings.MODEL,
+        model=os.environ.get("LLM_MODEL") or ("gemini-1.5-flash" if os.environ.get("GEMINI_API_KEY", "").startswith("AIza") or os.environ.get("LLM_PROVIDER") == "gemini" else settings.MODEL),
         approach=settings.APPROACH,
         contact_email=settings.CONTACT_EMAIL,
         version=settings.APP_VERSION,

@@ -203,12 +203,27 @@ def _default_llm_call(prompt: str, system: str, timeout: float = LLM_TIMEOUT_SEC
     Default HTTP client calling OpenAI-compatible chat completions if API key configured.
     Falls back gracefully if no API key is present.
     """
-    api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("LLM_API_KEY")
+    gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    llm_key = os.environ.get("LLM_API_KEY", "").strip()
+
+    # Valid Gemini API keys from Google AI Studio start with AIza
+    valid_gemini_key = gemini_key if (gemini_key.startswith("AIza") or os.environ.get("LLM_PROVIDER") == "gemini") else None
+
+    api_key = valid_gemini_key or openai_key or llm_key
     if not api_key:
         raise ValueError("No LLM API key configured.")
 
-    base_url = os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1/chat/completions")
-    model = os.environ.get("LLM_MODEL", settings.MODEL or "gpt-4o")
+    is_gemini = bool(valid_gemini_key) or os.environ.get("LLM_PROVIDER") == "gemini"
+    default_base_url = (
+        "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        if is_gemini
+        else "https://api.openai.com/v1/chat/completions"
+    )
+    default_model = "gemini-1.5-flash" if is_gemini else (settings.MODEL or "gpt-4o")
+
+    base_url = os.environ.get("LLM_BASE_URL", default_base_url)
+    model = os.environ.get("LLM_MODEL", default_model)
 
     payload = {
         "model": model,

@@ -47,3 +47,5 @@ services:
         value: "8.0"
       - key: OPENAI_API_KEY
         sync: false # Set via Render Dashboard Environment tab
+      - key: GEMINI_API_KEY
+        sync: false # Set via Render Dashboard Environment tab
