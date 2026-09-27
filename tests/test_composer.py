@@ -543,3 +543,127 @@ def test_render_template_smart_category_adaptation_gym_chronic_refill():
     assert "chronic" not in body.lower()
     assert "refill" not in body.lower()
 
+
+def test_ghost_customer_prevention_when_customer_is_none():
+    """Verify that when customer is None or empty, customer instructions are stripped and strict general grounding is applied."""
+    from app.composer import build_system_prompt, build_compact_context, compose_message
+
+    ctx = {
+        "now": "2026-04-26T10:00:00Z",
+        "merchant": {
+            "name": "Sandeep Tandoori",
+            "locality": "Sector 17",
+            "city": "Chandigarh",
+            "languages": ["en", "hi"],
+        },
+        "trigger": {
+            "kind": "chronic_refill_due",
+            "payload": {"placeholder": True},
+        },
+        "customer": None,
+    }
+
+    sys_p = build_system_prompt(ctx)
+    assert "Priya" not in sys_p
+    assert "No specific customer data was provided for this trigger. Address the merchant's customer base generally" in sys_p
+    assert "NEVER invent a customer name or specific visit date." in sys_p
+
+    compact = build_compact_context(
+        trigger={"kind": "chronic_refill_due", "payload": {"placeholder": True}},
+        merchant={"identity": {"name": "Sandeep Tandoori"}},
+        category={"slug": "restaurants"},
+        customer=None,
+    )
+    assert compact["customer"] is None
+    assert any("No specific customer data was provided" in f for f in compact["forbidden_claims"])
+
+    # Test user prompt in compose_message
+    prompts_captured = []
+    def mock_llm(u, s, t):
+        prompts_captured.append((u, s))
+        return '{"body": "Hello Sandeep, test message.", "cta": "Reply YES to proceed.", "rationale": "test"}'
+
+    from app.composer import _custom_llm_caller
+    import app.composer as comp_mod
+    comp_mod._custom_llm_caller = mock_llm
+    try:
+        compose_message(compact, ("fallback", "tmpl", [], "rat"))
+        assert len(prompts_captured) == 1
+        user_p, system_p = prompts_captured[0]
+        assert "CRITICAL CUSTOMER GROUNDING: No specific customer data was provided for this trigger." in user_p
+        assert user_p.strip().endswith("Do NOT default to pure English unless explicitly requested.")
+        assert system_p.strip().endswith("Do NOT default to pure English unless explicitly requested.")
+    finally:
+        comp_mod._custom_llm_caller = None
+
+
+def test_cross_category_intent_adaptation_all_categories_without_customer():
+    """Verify that chronic_refill_due adapts intent to regular diners/members/touch-ups when customer is absent."""
+    from app.decision.templates import render_template
+
+    trig = {"id": "t1", "kind": "chronic_refill_due", "payload": {}}
+
+    # 1. Restaurant
+    m_rest = {"identity": {"name": "Sandeep Dhaba"}, "category_slug": "restaurants"}
+    c_rest = {"slug": "restaurants", "display_name": "Restaurants"}
+    b_rest, _, _, _ = render_template(trig, m_rest, c_rest, None)
+    assert "it's time to bring back your regular weekend diners" in b_rest
+    assert "table reservation renewal" not in b_rest
+    assert "refill" not in b_rest.lower()
+
+    # 2. Gym
+    m_gym = {"identity": {"name": "Akash Gym"}, "category_slug": "gyms"}
+    c_gym = {"slug": "gyms", "display_name": "Gyms"}
+    b_gym, _, _, _ = render_template(trig, m_gym, c_gym, None)
+    assert "a few of your regulars are slipping on their routines. Let's get them back on the floor." in b_gym
+    assert "refill" not in b_gym.lower()
+
+    # 3. Salon
+    m_sal = {"identity": {"name": "Renu Salon"}, "category_slug": "salons"}
+    c_sal = {"slug": "salons", "display_name": "Salons"}
+    b_sal, _, _, _ = render_template(trig, m_sal, c_sal, None)
+    assert "it's been a few weeks since your regulars came in for their touch-ups." in b_sal
+    assert "refill" not in b_sal.lower()
+
+    # 4. Dentist
+    m_dent = {"identity": {"name": "Dr. Sameer Clinic"}, "category_slug": "dentists"}
+    c_dent = {"slug": "dentists", "display_name": "Dentists"}
+    b_dent, _, _, _ = render_template(trig, m_dent, c_dent, None)
+    assert "a few of your regular patients are overdue for their routine check-up." in b_dent
+    assert "refill" not in b_dent.lower()
+
+
+def test_language_recency_rule_placed_at_absolute_last_line():
+    """Verify that language preference specified in payload is respected and placed at absolute last line."""
+    from app.composer import build_system_prompt, compose_message
+
+    ctx = {
+        "trigger": {
+            "kind": "curious_ask_due",
+            "details": {"language_pref": "Hindi"},
+        },
+        "merchant": {"identity": {"name": "Mylari Cafe"}, "languages": ["en"]},
+        "customer": None,
+    }
+
+    sys_p = build_system_prompt(ctx)
+    last_line = sys_p.strip().split("\n")[-1]
+    assert last_line == "FINAL AND MOST IMPORTANT RULE: You MUST output the entire message in Hindi. Do NOT default to pure English unless explicitly requested."
+
+    prompts_captured = []
+    def mock_llm(u, s, t):
+        prompts_captured.append((u, s))
+        return '{"body": "नमस्ते, यह एक परीक्षण है।", "cta": "Reply YES to proceed.", "rationale": "test"}'
+
+    import app.composer as comp_mod
+    comp_mod._custom_llm_caller = mock_llm
+    try:
+        compose_message(ctx, ("fallback", "tmpl", [], "rat"))
+        assert len(prompts_captured) == 1
+        user_p, _ = prompts_captured[0]
+        u_last_line = user_p.strip().split("\n")[-1]
+        assert u_last_line == "FINAL AND MOST IMPORTANT RULE: You MUST output the entire message in Hindi. Do NOT default to pure English unless explicitly requested."
+    finally:
+        comp_mod._custom_llm_caller = None
+
+

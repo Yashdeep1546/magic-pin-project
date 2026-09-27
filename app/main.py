@@ -227,6 +227,19 @@ async def global_exception_handler(request: Request, exc: Exception):
 # Endpoints
 # ---------------------------------------------------------------------------
 
+@app.get("/", tags=["Root"])
+@app.head("/", tags=["Root"])
+async def root():
+    """Root endpoint for status check and API documentation link."""
+    return {
+        "status": "ok",
+        "service": settings.APP_NAME,
+        "docs": "/docs",
+        "healthz": "/v1/healthz",
+        "metadata": "/v1/metadata",
+    }
+
+
 @app.get(
     "/v1/healthz",
     response_model=HealthzResponse,

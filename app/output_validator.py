@@ -796,15 +796,26 @@ def validate_message(
             return False, f"Invented customer or third-party name 'dr. {doc_name}' not in context."
 
     common_invented = [
-        "priya", "rahul", "aanya", "sneha", "kavya", "rohit", "amit", "vikram",
+        "ira", "kavya", "priya", "rahul", "aanya", "sneha", "rohit", "amit", "vikram",
         "arjun", "neha", "pooja", "rajesh", "suresh", "ananya", "rohan", "neelam",
         "karan", "sunil", "anil", "deepak", "manish", "sanjay", "gupta", "sharma",
-        "patel", "verma", "singh", "kapoor", "mehta", "reddy"
+        "patel", "verma", "singh", "kapoor", "mehta", "reddy", "aarav", "isha",
+        "maya", "diya", "riya"
     ]
     for name in common_invented:
         if re.search(rf"\b{re.escape(name)}\b", body_lower):
             if name not in ledger.customer_names and name not in ledger.merchant_names and name not in ledger.anchors:
                 return False, f"Invented customer or third-party name '{name}' not in context."
+
+    if not ledger.customer_names:
+        cust_referral_match = re.search(
+            r"\b(?:patient|client|member|customer|guest|diner)\s+([A-Z][a-z]+)\b",
+            body_clean,
+        )
+        if cust_referral_match:
+            cand_name = cust_referral_match.group(1).lower().strip()
+            if cand_name not in ledger.merchant_names and cand_name not in ledger.anchors:
+                return False, f"Invented customer name '{cand_name}' when no customer was in context."
 
     # 9. Numeric, Price, Percentage, Metric Grounding check
     # Exclude structurally justified numbers (1-page, 3-step, top 3, 2-min, 1 question)
