@@ -1,16 +1,29 @@
-"""Deterministic decision engine for Magicpin Vera bot.
+"""Decision package combining taxonomy, suppression, resolution, scoring, templates, and orchestrator."""
 
-Compatibility façade re-exporting modules:
-- trigger taxonomy: app.decision.taxonomy
-- suppression: app.decision.suppression
-- context resolution: app.decision.resolution
-- scoring and selection: app.decision.scoring
-- template rendering: app.decision.templates
-- tick orchestration: app.decision.orchestrator
-"""
-
-from app.decision import (
-    # Taxonomy
+from app.decision.orchestrator import process_tick
+from app.decision.resolution import (
+    resolve_category,
+    resolve_context,
+    resolve_customer,
+    resolve_merchant,
+    resolve_trigger,
+)
+from app.decision.scoring import (
+    is_trigger_expired,
+    score_trigger,
+    select_strongest_signal,
+)
+from app.decision.suppression import (
+    DEFAULT_SUPPRESSION_WINDOW_SECONDS,
+    SuppressionEngine,
+    _parse_suppression_dt,
+    check_suppressed,
+    get_suppression_record,
+    infer_frequency_window,
+    mark_suppressed,
+    suppression_engine,
+)
+from app.decision.taxonomy import (
     CANONICAL_FAMILIES,
     CANONICAL_TRIGGER_POLICIES,
     DEFAULT_TRIGGER_POLICY,
@@ -30,26 +43,8 @@ from app.decision import (
     get_trigger_policy,
     is_known_trigger_kind,
     resolve_canonical_kind,
-    # Suppression
-    DEFAULT_SUPPRESSION_WINDOW_SECONDS,
-    SuppressionEngine,
-    _parse_suppression_dt,
-    check_suppressed,
-    get_suppression_record,
-    infer_frequency_window,
-    mark_suppressed,
-    suppression_engine,
-    # Resolution
-    resolve_category,
-    resolve_context,
-    resolve_customer,
-    resolve_merchant,
-    resolve_trigger,
-    # Scoring
-    is_trigger_expired,
-    score_trigger,
-    select_strongest_signal,
-    # Templates
+)
+from app.decision.templates import (
     _clean_entity_text,
     _render_generic_fallback,
     _render_milestone,
@@ -59,8 +54,6 @@ from app.decision import (
     _render_relationship,
     _render_research_knowledge,
     render_template,
-    # Orchestrator
-    process_tick,
 )
 
 __all__ = [

@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from app.decision_engine import (
     TRIGGER_PRIORITY,
     check_suppressed,
+    get_suppression_record,
     mark_suppressed,
     resolve_category,
     resolve_customer,
@@ -804,4 +805,267 @@ def test_expiry_uses_tick_now_parameter_not_server_wallclock():
     # Higher urgency trigger (trg_rel_past has urgency 5) is selected
     assert len(resp_earlier_now.json()["actions"]) == 1
     assert resp_earlier_now.json()["actions"][0]["trigger_id"] == "trg_rel_past"
+
+
+# ---------------------------------------------------------------------------
+# Deterministic Tests for Time-Aware Suppression Model
+# ---------------------------------------------------------------------------
+
+def test_suppression_immediate_replay():
+    """Repeated ticks at the exact same 'now' do not resend the same campaign."""
+    seed_merchant_and_category("m_rep_01", "dentists", "Immediate Replay Dental")
+    context_store.set("trigger", "trg_replay_1", 1, {
+        "id": "trg_replay_1",
+        "kind": "research_digest",
+        "merchant_id": "m_rep_01",
+        "urgency": 3,
+        "suppression_key": "research:dentists:2026-W17",
+        "expires_at": "2026-05-15T00:00:00Z",
+    })
+
+    tick_now = "2026-04-26T10:00:00Z"
+
+    # First tick succeeds and sends action
+    resp1 = client.post("/v1/tick", json={
+        "now": tick_now,
+        "available_triggers": ["trg_replay_1"],
+    })
+    assert resp1.status_code == 200
+    actions1 = resp1.json()["actions"]
+    assert len(actions1) == 1
+    assert actions1[0]["trigger_id"] == "trg_replay_1"
+    assert actions1[0]["suppression_key"] == "research:dentists:2026-W17"
+
+    # Verify key is actively suppressed at tick_now
+    assert check_suppressed("research:dentists:2026-W17", now=tick_now) is True
+
+    # Immediate replay with same timestamp must yield 0 actions
+    resp2 = client.post("/v1/tick", json={
+        "now": tick_now,
+        "available_triggers": ["trg_replay_1"],
+    })
+    assert resp2.status_code == 200
+    assert resp2.json()["actions"] == []
+
+
+def test_suppression_boundary_timestamps():
+    """Verifies strict boundary semantics: [sent_at, expires_at).
+    At now < expires_at: True (suppressed)
+    At now == expires_at: False (expired / allowed)
+    At now > expires_at: False (expired / allowed)
+    """
+    # 1. Test inferred ISO week window (7 days = 604,800s)
+    sup_key_week = "research:dentists:2026-W17"
+    sent_time = "2026-04-26T10:00:00Z"
+    mark_suppressed(sup_key_week, sent_at=sent_time)
+
+    rec = get_suppression_record(sup_key_week)
+    assert rec is not None
+    assert rec["window_seconds"] == 7 * 86400
+    assert rec["expires_at"].isoformat() == "2026-05-03T10:00:00+00:00"
+
+    # Immediately at send time -> suppressed
+    assert check_suppressed(sup_key_week, now="2026-04-26T10:00:00Z") is True
+    # 1 second before expiry boundary -> suppressed
+    assert check_suppressed(sup_key_week, now="2026-05-03T09:59:59Z") is True
+    # Exact expiry boundary -> expired (not suppressed)
+    assert check_suppressed(sup_key_week, now="2026-05-03T10:00:00Z") is False
+    # 1 second after boundary -> expired
+    assert check_suppressed(sup_key_week, now="2026-05-03T10:00:01Z") is False
+
+    # 2. Test explicit window_seconds parameter (e.g., 3600 seconds = 1 hour)
+    sup_key_custom = "custom:hourly:alert"
+    mark_suppressed(sup_key_custom, sent_at="2026-04-26T12:00:00Z", window_seconds=3600)
+    assert check_suppressed(sup_key_custom, now="2026-04-26T12:30:00Z") is True
+    assert check_suppressed(sup_key_custom, now="2026-04-26T12:59:59Z") is True
+    assert check_suppressed(sup_key_custom, now="2026-04-26T13:00:00Z") is False
+    assert check_suppressed(sup_key_custom, now="2026-04-26T13:00:01Z") is False
+
+    # 3. Test explicit expires_at parameter
+    sup_key_fixed = "fixed:cutoff:notice"
+    mark_suppressed(sup_key_fixed, sent_at="2026-04-26T00:00:00Z", expires_at="2026-04-28T18:00:00Z")
+    assert check_suppressed(sup_key_fixed, now="2026-04-28T17:59:59Z") is True
+    assert check_suppressed(sup_key_fixed, now="2026-04-28T18:00:00Z") is False
+
+
+def test_suppression_expired_suppression_allows_resend():
+    """Trigger can be resent once its frequency window has elapsed."""
+    seed_merchant_and_category("m_resend_01", "dentists", "Resend Test Dental")
+    # Date bucket suppression key (:YYYY-MM-DD -> 1 day = 86,400s)
+    sup_key = "daily_pulse:m_resend_01:2026-04-26"
+    context_store.set("trigger", "trg_daily_1", 1, {
+        "id": "trg_daily_1",
+        "kind": "curious_ask",
+        "merchant_id": "m_resend_01",
+        "urgency": 2,
+        "suppression_key": sup_key,
+        "expires_at": "2026-05-30T00:00:00Z",  # trigger offer valid for a month
+    })
+
+    t0 = "2026-04-26T10:00:00Z"
+    t_during = "2026-04-26T22:00:00Z"
+    t_after = "2026-04-27T10:00:00Z"  # exactly 24 hours later
+
+    # Tick 1: Sent at t0
+    resp1 = client.post("/v1/tick", json={
+        "now": t0,
+        "available_triggers": ["trg_daily_1"],
+    })
+    assert resp1.status_code == 200
+    assert len(resp1.json()["actions"]) == 1
+
+    # Tick 2: During 24h window at t_during -> suppressed
+    resp2 = client.post("/v1/tick", json={
+        "now": t_during,
+        "available_triggers": ["trg_daily_1"],
+    })
+    assert resp2.status_code == 200
+    assert resp2.json()["actions"] == []
+
+    # Tick 3: At t_after (24 hours elapsed) -> suppression expired, action sent again!
+    resp3 = client.post("/v1/tick", json={
+        "now": t_after,
+        "available_triggers": ["trg_daily_1"],
+    })
+    assert resp3.status_code == 200
+    assert len(resp3.json()["actions"]) == 1
+    assert resp3.json()["actions"][0]["trigger_id"] == "trg_daily_1"
+
+
+def test_suppression_different_merchants_isolation():
+    """Suppression of a key for merchant A does not suppress merchant B."""
+    seed_merchant_and_category("m_iso_01", "dentists", "Clinic Alpha")
+    seed_merchant_and_category("m_iso_02", "dentists", "Clinic Beta")
+
+    context_store.set("trigger", "trg_alpha", 1, {
+        "id": "trg_alpha",
+        "kind": "compliance_alert",
+        "merchant_id": "m_iso_01",
+        "urgency": 4,
+        "suppression_key": "compliance:m_iso_01:2026-W17",
+    })
+    context_store.set("trigger", "trg_beta", 1, {
+        "id": "trg_beta",
+        "kind": "compliance_alert",
+        "merchant_id": "m_iso_02",
+        "urgency": 4,
+        "suppression_key": "compliance:m_iso_02:2026-W17",
+    })
+
+    now_iso = "2026-04-26T10:00:00Z"
+
+    # Send trigger only for m_iso_01
+    resp1 = client.post("/v1/tick", json={
+        "now": now_iso,
+        "available_triggers": ["trg_alpha"],
+    })
+    assert resp1.status_code == 200
+    assert len(resp1.json()["actions"]) == 1
+    assert resp1.json()["actions"][0]["merchant_id"] == "m_iso_01"
+
+    # m_iso_01 suppression key is active, but m_iso_02 is unsuppressed
+    assert check_suppressed("compliance:m_iso_01:2026-W17", now=now_iso) is True
+    assert check_suppressed("compliance:m_iso_02:2026-W17", now=now_iso) is False
+
+    # Tick both triggers: m_iso_01 should be skipped, m_iso_02 should execute
+    resp2 = client.post("/v1/tick", json={
+        "now": now_iso,
+        "available_triggers": ["trg_alpha", "trg_beta"],
+    })
+    assert resp2.status_code == 200
+    actions = resp2.json()["actions"]
+    assert len(actions) == 1
+    assert actions[0]["merchant_id"] == "m_iso_02"
+    assert actions[0]["trigger_id"] == "trg_beta"
+
+
+def test_suppression_different_triggers_same_merchant():
+    """Suppressing trigger 1 does not suppress trigger 2 for the same merchant."""
+    seed_merchant_and_category("m_multi_trg", "dentists", "Multi Trigger Clinic")
+
+    context_store.set("trigger", "trg_research_digest", 1, {
+        "id": "trg_research_digest",
+        "kind": "research_digest",
+        "merchant_id": "m_multi_trg",
+        "urgency": 4,
+        "suppression_key": "research:m_multi_trg:2026-W17",
+    })
+    context_store.set("trigger", "trg_festival_promo", 1, {
+        "id": "trg_festival_promo",
+        "kind": "festival",
+        "merchant_id": "m_multi_trg",
+        "urgency": 3,
+        "suppression_key": "festival:m_multi_trg:akshaya_tritiya",
+    })
+
+    now_iso = "2026-04-26T10:00:00Z"
+
+    # Send research digest first
+    resp1 = client.post("/v1/tick", json={
+        "now": now_iso,
+        "available_triggers": ["trg_research_digest"],
+    })
+    assert resp1.status_code == 200
+    assert len(resp1.json()["actions"]) == 1
+    assert resp1.json()["actions"][0]["trigger_id"] == "trg_research_digest"
+
+    assert check_suppressed("research:m_multi_trg:2026-W17", now=now_iso) is True
+    assert check_suppressed("festival:m_multi_trg:akshaya_tritiya", now=now_iso) is False
+
+    # Now tick with festival promo: should execute without interference
+    resp2 = client.post("/v1/tick", json={
+        "now": now_iso,
+        "available_triggers": ["trg_research_digest", "trg_festival_promo"],
+    })
+    assert resp2.status_code == 200
+    actions = resp2.json()["actions"]
+    assert len(actions) == 1
+    assert actions[0]["trigger_id"] == "trg_festival_promo"
+
+
+def test_suppression_identical_triggers_different_time_buckets():
+    """Identical trigger kind/content with a new time bucket sends again."""
+    seed_merchant_and_category("m_bucket_01", "dentists", "Time Bucket Clinic")
+
+    # Week 17 trigger
+    context_store.set("trigger", "trg_week_17", 1, {
+        "id": "trg_week_17",
+        "kind": "research_digest",
+        "merchant_id": "m_bucket_01",
+        "urgency": 3,
+        "suppression_key": "research:dentists:2026-W17",
+    })
+    # Week 18 trigger (new time bucket)
+    context_store.set("trigger", "trg_week_18", 1, {
+        "id": "trg_week_18",
+        "kind": "research_digest",
+        "merchant_id": "m_bucket_01",
+        "urgency": 3,
+        "suppression_key": "research:dentists:2026-W18",
+    })
+
+    now_w17 = "2026-04-26T10:00:00Z"
+    now_w18 = "2026-05-03T10:00:00Z"
+
+    # Tick in Week 17 fires Week 17 trigger
+    resp1 = client.post("/v1/tick", json={
+        "now": now_w17,
+        "available_triggers": ["trg_week_17"],
+    })
+    assert resp1.status_code == 200
+    assert len(resp1.json()["actions"]) == 1
+    assert resp1.json()["actions"][0]["suppression_key"] == "research:dentists:2026-W17"
+
+    # In Week 18, Week 18 trigger is fresh and not suppressed
+    assert check_suppressed("research:dentists:2026-W18", now=now_w18) is False
+
+    resp2 = client.post("/v1/tick", json={
+        "now": now_w18,
+        "available_triggers": ["trg_week_18"],
+    })
+    assert resp2.status_code == 200
+    assert len(resp2.json()["actions"]) == 1
+    assert resp2.json()["actions"][0]["trigger_id"] == "trg_week_18"
+    assert resp2.json()["actions"][0]["suppression_key"] == "research:dentists:2026-W18"
+
 

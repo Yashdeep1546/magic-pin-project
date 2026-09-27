@@ -18,6 +18,7 @@ def format_gate_response(
     gate_result: VersionGateResult,
     current_version: Optional[int] = None,
     ack_id: Optional[str] = None,
+    stored_at: Optional[str] = None,
 ) -> Tuple[int, Dict[str, Any]]:
     """
     Maps VersionGateResult to exact contract response per testing-brief.md §2.1:
@@ -36,7 +37,7 @@ def format_gate_response(
     return 200, {
         "accepted": True,
         "ack_id": ack_id or f"ack_{uuid.uuid4().hex[:8]}",
-        "stored_at": datetime.now(timezone.utc).isoformat(),
+        "stored_at": stored_at or datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -70,19 +71,23 @@ class ContextStore:
             now_iso = datetime.now(timezone.utc).isoformat()
 
             if existing is None:
+                ack_id = f"ack_{uuid.uuid4().hex[:8]}"
                 self._data[key] = {
                     "version": version,
                     "payload": payload,
                     "updated_at": now_iso,
+                    "ack_id": ack_id,
                 }
                 return VersionGateResult.CREATED, None
 
             current_version = existing["version"]
             if version > current_version:
+                ack_id = f"ack_{uuid.uuid4().hex[:8]}"
                 self._data[key] = {
                     "version": version,
                     "payload": payload,
                     "updated_at": now_iso,
+                    "ack_id": ack_id,
                 }
                 return VersionGateResult.REPLACED, current_version
             elif version == current_version:
@@ -91,6 +96,19 @@ class ContextStore:
             else:
                 # Stale version
                 return VersionGateResult.STALE, current_version
+
+    def get_meta(self, scope: str, context_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve metadata (ack_id, updated_at, version) for stored context."""
+        key = (scope, context_id)
+        with self._lock:
+            item = self._data.get(key)
+            if item is None:
+                return None
+            return {
+                "version": item.get("version"),
+                "ack_id": item.get("ack_id"),
+                "updated_at": item.get("updated_at"),
+            }
 
     def get(self, scope: str, context_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve stored context item by (scope, context_id)."""
@@ -183,26 +201,66 @@ class ConversationStore:
             return dict(self._conversations[conversation_id])
 
     def add_turn(self, conversation_id: str, turn: Dict[str, Any]) -> None:
-        """Record a turn in the conversation."""
+        """
+        Record a turn in the conversation.
+        Idempotent:
+        - If an exact duplicate turn already exists (same turn_number and same message),
+          it is not appended.
+        - If the same turn_number exists with a changed message, it updates that turn in place.
+        - If turn_number is new or None, it is appended.
+        """
         with self._lock:
+            turn_num = turn.get("turn_number")
+            msg = (turn.get("message") or "").strip()
+
             if conversation_id not in self._conversations:
                 self._conversations[conversation_id] = {
                     "merchant_id": turn.get("merchant_id"),
                     "customer_id": turn.get("customer_id"),
                     "trigger_id": turn.get("trigger_id"),
-                    "turns": [turn],
+                    "turns": [dict(turn)],
                     "last_action": None,
                     "state": "active",
                     "sent_messages": [],
                 }
-            else:
-                self._conversations[conversation_id]["turns"].append(turn)
+                return
+
+            turns = self._conversations[conversation_id]["turns"]
+
+            # 1. Exact duplicate check
+            for existing_turn in turns:
+                ex_num = existing_turn.get("turn_number")
+                ex_msg = (existing_turn.get("message") or "").strip()
+                norm_ex_num = 1 if ex_num is None else ex_num
+                norm_new_num = 1 if turn_num is None else turn_num
+                if norm_ex_num == norm_new_num and ex_msg == msg:
+                    return
+
+            # 2. Same turn number with changed message: update in place
+            if turn_num is not None:
+                for i, existing_turn in enumerate(turns):
+                    if existing_turn.get("turn_number") == turn_num:
+                        turns[i] = dict(turn)
+                        return
+
+            # 3. New turn
+            turns.append(dict(turn))
 
     def add_sent_message(self, conversation_id: str, message: Dict[str, Any]) -> None:
-        """Record a sent message in the conversation."""
+        """Record a sent message in the conversation, avoiding duplicate appends of the exact same message payload."""
         with self._lock:
             if conversation_id in self._conversations:
-                self._conversations[conversation_id]["sent_messages"].append(message)
+                sent = self._conversations[conversation_id]["sent_messages"]
+                # Deduplicate: if the immediately preceding message has identical body and template/action, do not duplicate
+                if sent:
+                    last_msg = sent[-1]
+                    if (
+                        last_msg.get("body") == message.get("body")
+                        and last_msg.get("template_name") == message.get("template_name")
+                        and last_msg.get("action") == message.get("action")
+                    ):
+                        return
+                sent.append(dict(message))
 
     def set_last_action(self, conversation_id: str, action: str) -> None:
         """Update last action taken in conversation."""

@@ -116,17 +116,29 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
             loc = first_err.get("loc", [])
             field_name = str(loc[-1]) if loc else "request"
             err_msg = first_err.get("msg", "Validation error")
-            if "scope" in field_name:
-                reason = "invalid_scope"
+            err_type = first_err.get("type", "")
+
+            if loc in (["body"], ("body",), []) or err_type in ("model_attributes_type", "model_type"):
+                reason = "malformed_request"
+                details = "Request body must be a JSON object."
+            elif err_type == "extra_forbidden":
+                reason = "unknown_field"
+                details = f"Validation failed for {field_name}: {err_msg}"
+            elif "scope" in field_name:
+                reason = "missing_scope" if err_type == "missing" else "invalid_scope"
+                details = f"Validation failed for {field_name}: {err_msg}"
             elif "context_id" in field_name:
                 reason = "missing_context_id"
+                details = f"Validation failed for {field_name}: {err_msg}"
             elif "version" in field_name:
-                reason = "invalid_version"
+                reason = "missing_version" if err_type == "missing" else "invalid_version"
+                details = f"Validation failed for {field_name}: {err_msg}"
             elif "payload" in field_name:
-                reason = "empty_payload"
+                reason = "missing_payload" if err_type in ("missing", "dict_type", "null_type") else "empty_payload"
+                details = f"Validation failed for {field_name}: {err_msg}"
             else:
                 reason = "invalid_request"
-            details = f"Validation failed for {field_name}: {err_msg}"
+                details = f"Validation failed for {field_name}: {err_msg}"
 
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -289,9 +301,12 @@ async def receive_context(body: ContextRequest):
         payload=payload,
     )
 
+    meta = context_store.get_meta(scope, context_id)
     status_code, response_data = format_gate_response(
         gate_result=gate_result,
         current_version=current_version,
+        ack_id=meta.get("ack_id") if meta else None,
+        stored_at=meta.get("updated_at") if meta else None,
     )
     return JSONResponse(status_code=status_code, content=response_data)
 
@@ -336,6 +351,7 @@ async def reply(body: ReplyRequest):
     return conversation_state_machine.process_reply(
         request=body,
         conversation_store=conversation_store,
+        context_store=context_store,
     )
 
 
