@@ -88,15 +88,47 @@ def test_resolvers():
     assert resolve_customer(context_store, "non_existent") is None
 
 
-def test_trigger_priorities():
+def test_data_driven_urgency_scoring():
+    """Verify that score_trigger reads urgency (1-5) and combines with context relevance."""
+    # Base urgency tests without context
+    trg_u1 = {"id": "t1", "kind": "festival_upcoming", "urgency": 1}
+    trg_u3 = {"id": "t3", "kind": "festival_upcoming", "urgency": 3}
+    trg_u5 = {"id": "t5", "kind": "festival_upcoming", "urgency": 5}
+    # No context: merchant_relevance=0, category_relevance=0, merchant-level customer_relevance=5
+    assert score_trigger(trg_u1) == 20 + 5
+    assert score_trigger(trg_u3) == 60 + 5
+    assert score_trigger(trg_u5) == 100 + 5
+
+    # Urgency clamping: <=1 clamped to 1, >=5 clamped to 5, invalid string to 1
+    assert score_trigger({"id": "t0", "urgency": 0}) == 20 + 5
+    assert score_trigger({"id": "t9", "urgency": 99}) == 100 + 5
+    assert score_trigger({"id": "tnone", "urgency": None}) == 20 + 5
+    assert score_trigger({"id": "tbad", "urgency": "invalid"}) == 20 + 5
+
+    # Relevance bonuses
+    merchant = {
+        "merchant_id": "m1",
+        "category_slug": "dentists",
+        "subscription": {"status": "active"},
+    }
+    category = {"slug": "dentists"}
+    customer = {"customer_id": "c1", "preferences": {"reminder_opt_in": True}}
+
+    # Active merchant (+15), matching category (+15), merchant-level (+5)
+    score_full_m = score_trigger({"id": "t_m", "urgency": 4}, merchant, category, None)
+    assert score_full_m == 80 + 15 + 15 + 5
+
+    # Customer trigger with customer present (+15)
+    trg_cust = {"id": "t_c", "customer_id": "c1", "urgency": 4}
+    score_cust = score_trigger(trg_cust, merchant, category, customer)
+    assert score_cust == 80 + 15 + 15 + 15
+
+    # Customer trigger with missing customer (-10)
+    score_missing_cust = score_trigger(trg_cust, merchant, category, None)
+    assert score_missing_cust == 80 + 15 + 15 - 10
+
+    # Deprecated TRIGGER_PRIORITY dict remains accessible for legacy consumers
     assert TRIGGER_PRIORITY["compliance_alert"] == 100
-    assert TRIGGER_PRIORITY["recall_due"] == 95
-    assert TRIGGER_PRIORITY["performance_drop"] == 90
-    assert TRIGGER_PRIORITY["customer_winback"] == 80
-    assert TRIGGER_PRIORITY["research_digest"] == 70
-    assert TRIGGER_PRIORITY["festival"] == 60
-    assert TRIGGER_PRIORITY["curious_ask"] == 50
-    assert TRIGGER_PRIORITY["seasonal"] == 40
 
 
 def test_select_strongest_signal_unit():
@@ -400,3 +432,376 @@ def test_empty_actions_case():
     })
     assert response.status_code == 200
     assert response.json() == {"actions": []}
+
+
+# ---------------------------------------------------------------------------
+# Real Taxonomy Coverage (§4.3 and engagement loops)
+# ---------------------------------------------------------------------------
+
+def test_real_external_triggers():
+    """Verify all real external trigger kinds from challenge-brief §4.3 render properly."""
+    seed_merchant_and_category("m_ext", "dentists", "Dr. Meera Dental")
+
+    # 1. festival_upcoming
+    context_store.set("trigger", "trg_fest", 1, {
+        "id": "trg_fest",
+        "kind": "festival_upcoming",
+        "merchant_id": "m_ext",
+        "urgency": 3,
+        "payload": {"festival_name": "Diwali", "days_until": 4},
+    })
+    resp1 = client.post("/v1/tick", json={"now": "2026-04-26T10:00:00Z", "available_triggers": ["trg_fest"]})
+    assert resp1.status_code == 200
+    a1 = resp1.json()["actions"][0]
+    assert "Diwali is in 4 days" in a1["body"]
+    assert "Dr. Meera Dental" in a1["body"]
+    assert a1["template_name"] == "template_opportunity_event_v1"
+
+    # 2. weather_heatwave
+    context_store.set("trigger", "trg_heat", 1, {
+        "id": "trg_heat",
+        "kind": "weather_heatwave",
+        "merchant_id": "m_ext",
+        "urgency": 4,
+        "payload": {"temperature": "42°C", "city": "Delhi"},
+    })
+    resp2 = client.post("/v1/tick", json={"now": "2026-04-26T10:00:00Z", "available_triggers": ["trg_heat"]})
+    assert resp2.status_code == 200
+    a2 = resp2.json()["actions"][0]
+    assert "heatwave alert (42°C) in Delhi" in a2["body"]
+    assert a2["template_name"] == "template_opportunity_event_v1"
+
+    # 3. local_news_event
+    context_store.set("trigger", "trg_news", 1, {
+        "id": "trg_news",
+        "kind": "local_news_event",
+        "merchant_id": "m_ext",
+        "urgency": 3,
+        "payload": {"event": "Expressway closed for maintenance"},
+    })
+    resp3 = client.post("/v1/tick", json={"now": "2026-04-26T10:00:00Z", "available_triggers": ["trg_news"]})
+    assert resp3.status_code == 200
+    a3 = resp3.json()["actions"][0]
+    assert "Expressway closed for maintenance" in a3["body"]
+    assert a3["template_name"] == "template_opportunity_event_v1"
+
+    # 4. category_research_digest_release & research_digest
+    context_store.set("trigger", "trg_digest", 1, {
+        "id": "trg_digest",
+        "kind": "category_research_digest_release",
+        "merchant_id": "m_ext",
+        "urgency": 3,
+        "payload": {"title": "3-mo fluoride recall cuts caries recurrence 38%"},
+    })
+    resp4 = client.post("/v1/tick", json={"now": "2026-04-26T10:00:00Z", "available_triggers": ["trg_digest"]})
+    assert resp4.status_code == 200
+    a4 = resp4.json()["actions"][0]
+    assert "fluoride recall" in a4["body"]
+    assert a4["template_name"] == "template_research_knowledge_v1"
+
+    # Also research_digest (alias / dataset naming)
+    context_store.set("trigger", "trg_rd", 1, {
+        "id": "trg_rd",
+        "kind": "research_digest",
+        "merchant_id": "m_ext",
+        "urgency": 3,
+        "payload": {"top_item": {"title": "New clinical guidelines on sealants"}},
+    })
+    resp4b = client.post("/v1/tick", json={"now": "2026-04-26T10:00:00Z", "available_triggers": ["trg_rd"]})
+    assert resp4b.status_code == 200
+    a4b = resp4b.json()["actions"][0]
+    assert "sealants" in a4b["body"]
+    assert a4b["template_name"] == "template_research_digest_v1"
+
+    # 5. regulation_change
+    context_store.set("trigger", "trg_reg", 1, {
+        "id": "trg_reg",
+        "kind": "regulation_change",
+        "merchant_id": "m_ext",
+        "urgency": 4,
+        "payload": {"topic": "DCI radiograph dose limit revised", "deadline_iso": "2026-12-15"},
+    })
+    resp5 = client.post("/v1/tick", json={"now": "2026-04-26T10:00:00Z", "available_triggers": ["trg_reg"]})
+    assert resp5.status_code == 200
+    a5 = resp5.json()["actions"][0]
+    assert "DCI radiograph dose limit revised" in a5["body"]
+    assert a5["template_name"] == "template_research_knowledge_v1"
+
+    # 6. competitor_opened
+    context_store.set("trigger", "trg_comp_open", 1, {
+        "id": "trg_comp_open",
+        "kind": "competitor_opened",
+        "merchant_id": "m_ext",
+        "urgency": 3,
+        "payload": {"competitor_name": "Smile Studio", "distance_km": 1.3},
+    })
+    resp6 = client.post("/v1/tick", json={"now": "2026-04-26T10:00:00Z", "available_triggers": ["trg_comp_open"]})
+    assert resp6.status_code == 200
+    a6 = resp6.json()["actions"][0]
+    assert "Smile Studio" in a6["body"]
+    assert "1.3km away" in a6["body"]
+    assert a6["template_name"] == "template_opportunity_event_v1"
+
+    # 7. category_trend_movement
+    context_store.set("trigger", "trg_trend", 1, {
+        "id": "trg_trend",
+        "kind": "category_trend_movement",
+        "merchant_id": "m_ext",
+        "urgency": 3,
+        "payload": {"trend": "clear aligners Delhi", "delta_pct": 0.62},
+    })
+    resp7 = client.post("/v1/tick", json={"now": "2026-04-26T10:00:00Z", "available_triggers": ["trg_trend"]})
+    assert resp7.status_code == 200
+    a7 = resp7.json()["actions"][0]
+    assert "clear aligners Delhi" in a7["body"]
+    assert "+62%" in a7["body"]
+    assert a7["template_name"] == "template_research_knowledge_v1"
+
+
+def test_real_internal_triggers():
+    """Verify all real internal trigger kinds from challenge-brief §4.3 render properly."""
+    seed_merchant_and_category("m_int", "dentists", "Dr. Meera Dental")
+
+    # 1. perf_spike
+    context_store.set("trigger", "trg_spike", 1, {
+        "id": "trg_spike",
+        "kind": "perf_spike",
+        "merchant_id": "m_int",
+        "urgency": 3,
+        "payload": {"metric": "views", "delta_pct": 0.28, "likely_driver": "instagram_reel"},
+    })
+    resp1 = client.post("/v1/tick", json={"now": "2026-04-26T10:00:00Z", "available_triggers": ["trg_spike"]})
+    assert resp1.status_code == 200
+    a1 = resp1.json()["actions"][0]
+    assert "views jumped +28%" in a1["body"]
+    assert "instagram reel" in a1["body"]
+    assert a1["template_name"] == "template_performance_v1"
+
+    # 2. perf_dip
+    context_store.set("trigger", "trg_dip", 1, {
+        "id": "trg_dip",
+        "kind": "perf_dip",
+        "merchant_id": "m_int",
+        "urgency": 4,
+        "payload": {"metric": "calls", "delta_pct": -0.40},
+    })
+    resp2 = client.post("/v1/tick", json={"now": "2026-04-26T10:00:00Z", "available_triggers": ["trg_dip"]})
+    assert resp2.status_code == 200
+    a2 = resp2.json()["actions"][0]
+    assert "calls dipped 40%" in a2["body"]
+    assert a2["template_name"] == "template_performance_drop_v1"
+
+    # 3. milestone_reached
+    context_store.set("trigger", "trg_mile", 1, {
+        "id": "trg_mile",
+        "kind": "milestone_reached",
+        "merchant_id": "m_int",
+        "urgency": 2,
+        "payload": {"metric": "reviews", "milestone_value": 100, "value_now": 95, "is_imminent": True},
+    })
+    resp3 = client.post("/v1/tick", json={"now": "2026-04-26T10:00:00Z", "available_triggers": ["trg_mile"]})
+    assert resp3.status_code == 200
+    a3 = resp3.json()["actions"][0]
+    assert "95 reviews" in a3["body"]
+    assert "just 5 away" in a3["body"]
+    assert a3["template_name"] == "template_milestone_v1"
+
+    # 4. dormant_with_vera
+    context_store.set("trigger", "trg_dorm", 1, {
+        "id": "trg_dorm",
+        "kind": "dormant_with_vera",
+        "merchant_id": "m_int",
+        "urgency": 2,
+        "payload": {"days_since_last_merchant_message": 14},
+    })
+    resp4 = client.post("/v1/tick", json={"now": "2026-04-26T10:00:00Z", "available_triggers": ["trg_dorm"]})
+    assert resp4.status_code == 200
+    a4 = resp4.json()["actions"][0]
+    assert "14 days since our last chat" in a4["body"]
+    assert a4["template_name"] == "template_relationship_v1"
+
+    # 5. review_theme_emerged
+    context_store.set("trigger", "trg_rev", 1, {
+        "id": "trg_rev",
+        "kind": "review_theme_emerged",
+        "merchant_id": "m_int",
+        "urgency": 3,
+        "payload": {"theme": "wait_time", "occurrences_30d": 3},
+    })
+    resp5 = client.post("/v1/tick", json={"now": "2026-04-26T10:00:00Z", "available_triggers": ["trg_rev"]})
+    assert resp5.status_code == 200
+    a5 = resp5.json()["actions"][0]
+    assert "3 recent customer reviews mentioning 'wait time'" in a5["body"]
+    assert a5["template_name"] == "template_relationship_v1"
+
+    # 6. scheduled_recurring
+    context_store.set("trigger", "trg_recur", 1, {
+        "id": "trg_recur",
+        "kind": "scheduled_recurring",
+        "merchant_id": "m_int",
+        "urgency": 1,
+    })
+    resp6 = client.post("/v1/tick", json={"now": "2026-04-26T10:00:00Z", "available_triggers": ["trg_recur"]})
+    assert resp6.status_code == 200
+    a6 = resp6.json()["actions"][0]
+    assert "highest customer demand" in a6["body"]
+    assert a6["template_name"] == "template_curious_ask_v1"
+
+
+def test_real_customer_scoped_triggers():
+    """Verify customer-scoped triggers (recall_due, customer_lapsed_soft, appointment_tomorrow, unplanned_slot_open)."""
+    seed_merchant_and_category("m_cust", "dentists", "Dr. Meera Dental")
+    context_store.set("customer", "c_priya", 1, {
+        "customer_id": "c_priya",
+        "identity": {"name": "Priya", "phone": "+919876543210"},
+        "preferences": {"reminder_opt_in": True},
+    })
+
+    # 1. recall_due
+    context_store.set("trigger", "trg_rec", 1, {
+        "id": "trg_rec",
+        "scope": "customer",
+        "kind": "recall_due",
+        "merchant_id": "m_cust",
+        "customer_id": "c_priya",
+        "urgency": 4,
+        "payload": {"service_due": "teeth cleaning"},
+    })
+    resp1 = client.post("/v1/tick", json={"now": "2026-04-26T10:00:00Z", "available_triggers": ["trg_rec"]})
+    assert resp1.status_code == 200
+    a1 = resp1.json()["actions"][0]
+    assert a1["customer_id"] == "c_priya"
+    assert "Priya is due for teeth cleaning" in a1["body"]
+    assert a1["template_name"] == "template_recall_due_v1"
+
+    # 2. customer_lapsed_soft
+    context_store.set("trigger", "trg_lapse", 1, {
+        "id": "trg_lapse",
+        "scope": "customer",
+        "kind": "customer_lapsed_soft",
+        "merchant_id": "m_cust",
+        "customer_id": "c_priya",
+        "urgency": 3,
+    })
+    resp2 = client.post("/v1/tick", json={"now": "2026-04-26T10:00:00Z", "available_triggers": ["trg_lapse"]})
+    assert resp2.status_code == 200
+    a2 = resp2.json()["actions"][0]
+    assert "Priya hasn't visited in over 60 days" in a2["body"]
+    assert a2["template_name"] == "template_recall_lapse_v1"
+
+    # 3. appointment_tomorrow
+    context_store.set("trigger", "trg_appt", 1, {
+        "id": "trg_appt",
+        "scope": "customer",
+        "kind": "appointment_tomorrow",
+        "merchant_id": "m_cust",
+        "customer_id": "c_priya",
+        "urgency": 4,
+        "payload": {"time": "11:00 AM tomorrow"},
+    })
+    resp3 = client.post("/v1/tick", json={"now": "2026-04-26T10:00:00Z", "available_triggers": ["trg_appt"]})
+    assert resp3.status_code == 200
+    a3 = resp3.json()["actions"][0]
+    assert "Priya has an appointment scheduled for 11:00 AM tomorrow" in a3["body"]
+    assert a3["template_name"] == "template_recall_lapse_v1"
+
+    # 4. unplanned_slot_open (capacity optimizer from engagement loops)
+    context_store.set("trigger", "trg_slot", 1, {
+        "id": "trg_slot",
+        "scope": "customer",
+        "kind": "unplanned_slot_open",
+        "merchant_id": "m_cust",
+        "urgency": 3,
+        "payload": {"slot": "3:00 PM tomorrow"},
+    })
+    resp4 = client.post("/v1/tick", json={"now": "2026-04-26T10:00:00Z", "available_triggers": ["trg_slot"]})
+    assert resp4.status_code == 200
+    a4 = resp4.json()["actions"][0]
+    assert "you have 3:00 PM tomorrow open" in a4["body"]
+    assert a4["template_name"] == "template_recall_lapse_v1"
+
+
+def test_unhandled_trigger_fallback_and_warning_logged(caplog):
+    """Ensure any trigger kind not explicitly handled gets safe deterministic fallback and logs warning."""
+    import logging
+    seed_merchant_and_category("m_fallback", "dentists", "Dr. Meera Dental")
+    context_store.set("trigger", "trg_unknown", 1, {
+        "id": "trg_unknown",
+        "kind": "unmapped_experimental_event",
+        "merchant_id": "m_fallback",
+        "urgency": 2,
+    })
+
+    with caplog.at_level(logging.WARNING):
+        resp = client.post("/v1/tick", json={"now": "2026-04-26T10:00:00Z", "available_triggers": ["trg_unknown"]})
+
+    assert resp.status_code == 200
+    actions = resp.json()["actions"]
+    assert len(actions) == 1
+    act = actions[0]
+    assert act["template_name"] == "template_default_v1"
+    assert "Dr. Meera Dental" in act["body"]
+    assert "Free Dental Checkup" in act["body"]
+    assert "Unmatched trigger kind 'unmapped_experimental_event' falling back to generic family" in caplog.text
+
+
+def test_expiry_uses_tick_now_parameter_not_server_wallclock():
+    """
+    Expiry checks must compare strictly against the 'now' parameter in the /v1/tick
+    request body, never against the server's real wall-clock time.
+    """
+    seed_merchant_and_category("m_time_test", "dentists", "Time Test Clinic")
+
+    fake_now = "2024-06-01T12:00:00Z"
+
+    # Trigger A: expires in the future relative to fake_now (2024-06-02),
+    # but in the past relative to real 2026 server wall clock
+    context_store.set("trigger", "trg_rel_future", 1, {
+        "id": "trg_rel_future",
+        "kind": "performance_drop",
+        "merchant_id": "m_time_test",
+        "urgency": 4,
+        "expires_at": "2024-06-02T00:00:00Z",
+        "suppression_key": "time_test:future",
+    })
+
+    # Trigger B: expires in the past relative to fake_now (2024-05-31)
+    context_store.set("trigger", "trg_rel_past", 1, {
+        "id": "trg_rel_past",
+        "kind": "performance_drop",
+        "merchant_id": "m_time_test",
+        "urgency": 5,
+        "expires_at": "2024-05-31T00:00:00Z",
+        "suppression_key": "time_test:past",
+    })
+
+    # Test 1: Relative to fake_now (2024-06-01):
+    # trg_rel_past is filtered out as expired relative to fake_now
+    # trg_rel_future is NOT filtered out because it expires after fake_now
+    resp = client.post("/v1/tick", json={
+        "now": fake_now,
+        "available_triggers": ["trg_rel_future", "trg_rel_past"],
+    })
+    assert resp.status_code == 200
+    actions = resp.json()["actions"]
+    assert len(actions) == 1
+    assert actions[0]["trigger_id"] == "trg_rel_future"
+
+    # Test 2: If fake_now is shifted past 2024-06-02, trg_rel_future IS filtered out as expired
+    resp_future_now = client.post("/v1/tick", json={
+        "now": "2024-06-03T00:00:00Z",
+        "available_triggers": ["trg_rel_future", "trg_rel_past"],
+    })
+    assert resp_future_now.status_code == 200
+    assert len(resp_future_now.json()["actions"]) == 0
+
+    # Test 3: If fake_now is earlier than 2024-05-31, neither trigger is expired
+    resp_earlier_now = client.post("/v1/tick", json={
+        "now": "2024-05-01T00:00:00Z",
+        "available_triggers": ["trg_rel_future", "trg_rel_past"],
+    })
+    assert resp_earlier_now.status_code == 200
+    # Higher urgency trigger (trg_rel_past has urgency 5) is selected
+    assert len(resp_earlier_now.json()["actions"]) == 1
+    assert resp_earlier_now.json()["actions"][0]["trigger_id"] == "trg_rel_past"
+

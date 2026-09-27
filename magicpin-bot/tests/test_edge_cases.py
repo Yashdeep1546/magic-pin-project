@@ -9,7 +9,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from app.composer import compose_message, set_custom_llm_caller
+from app.composer import build_compact_context, compose_message, set_custom_llm_caller
 from app.decision_engine import suppression_engine
 from app.main import app
 from app.output_validator import build_evidence_ledger, validate_message
@@ -33,7 +33,7 @@ def clean_stores():
 
 
 def setup_standard_context():
-    """Sets up standard category, merchant, and trigger contexts for edge-case testing."""
+    """Sets up standard category, merchant, and trigger contexts for edge-case testing using real nested schemas."""
     context_store.set(
         "category",
         "dentists",
@@ -41,7 +41,27 @@ def setup_standard_context():
         {
             "slug": "dentists",
             "display_name": "Dentists",
-            "peer_stats": {"avg_ctr": 0.030},
+            "voice": {
+                "tone": "peer_clinical",
+                "vocab_allowed": ["fluoride varnish", "caries", "scaling"],
+                "taboos": ["guaranteed", "100% safe", "miracle"],
+            },
+            "peer_stats": {
+                "avg_rating": 4.4,
+                "avg_reviews": 62,
+                "avg_ctr": 0.030,
+            },
+            "digest": [
+                {
+                    "id": "d_2026W17_jida_fluoride",
+                    "kind": "research",
+                    "title": "3-month fluoride varnish recall outperforms 6-month for high-risk adult caries",
+                    "source": "JIDA Oct 2026, p.14",
+                    "trial_n": 2100,
+                    "patient_segment": "high_risk_adults",
+                    "summary": "Multi-center Indian trial shows 38% lower caries recurrence with 3-month vs 6-month recall.",
+                }
+            ],
         },
     )
     context_store.set(
@@ -51,9 +71,31 @@ def setup_standard_context():
         {
             "merchant_id": "m_meera",
             "category_slug": "dentists",
-            "identity": {"name": "Dr. Meera Dental Clinic", "city": "Delhi"},
-            "performance": {"ctr": 0.021, "views": 1200},
-            "offers": [{"title": "Dental Cleaning @ ₹299", "status": "active"}],
+            "identity": {
+                "name": "Dr. Meera Dental Clinic",
+                "city": "Delhi",
+                "locality": "Lajpat Nagar",
+                "owner_first_name": "Meera",
+            },
+            "performance": {
+                "window_days": 30,
+                "views": 2410,
+                "calls": 18,
+                "directions": 45,
+                "ctr": 0.021,
+                "delta_7d": {"views_pct": 0.18, "calls_pct": -0.05, "ctr_pct": 0.02},
+            },
+            "offers": [
+                {"id": "o_1", "title": "Dental Cleaning @ ₹299", "status": "active"},
+                {"id": "o_2", "title": "Deep Cleaning @ ₹499", "status": "expired"},
+            ],
+            "customer_aggregate": {
+                "total_unique_ytd": 540,
+                "lapsed_180d_plus": 78,
+                "retention_6mo_pct": 0.38,
+                "high_risk_adult_count": 124,
+            },
+            "signals": ["stale_posts:22d", "ctr_below_peer_median", "high_risk_adult_cohort"],
         },
     )
     context_store.set(
@@ -62,6 +104,7 @@ def setup_standard_context():
         1,
         {
             "id": "trg_perf_01",
+            "scope": "merchant",
             "kind": "performance_drop",
             "merchant_id": "m_meera",
             "urgency": 3,
@@ -643,3 +686,87 @@ def test_null_and_missing_optional_fields_across_endpoints():
     )
     assert resp_reply.status_code == 200
     assert resp_reply.json()["action"] == "send"
+
+
+# ---------------------------------------------------------------------------
+# Real Nested Schema Fact Grounding Tests
+# ---------------------------------------------------------------------------
+
+def test_nested_performance_delta_7d_grounding():
+    """Verify delta_7d numbers (+18.0% views) are accepted, but invented numbers are rejected."""
+    setup_standard_context()
+    merchant = context_store.get("merchant", "m_meera")
+    category = context_store.get("category", "dentists")
+    trigger = context_store.get("trigger", "trg_perf_01")
+
+    compact_ctx = build_compact_context(merchant, category, trigger)
+    ledger = build_evidence_ledger(compact_ctx)
+
+    # Valid grounded message citing real 18% views growth
+    grounded_msg = "Dr. Meera Dental Clinic, your 7-day views are up 18%. Want to promote Dental Cleaning @ ₹299?"
+    valid, reason = validate_message(grounded_msg, ledger)
+    assert valid, f"Expected valid, got: {reason}"
+
+    # Ungrounded message citing invented 73% views growth
+    hallucinated_msg = "Dr. Meera Dental Clinic, your 7-day views jumped 73%. Want to promote Dental Cleaning @ ₹299?"
+    valid, reason = validate_message(hallucinated_msg, ledger)
+    assert not valid
+    assert "Unverified numeric claim '73'" in reason
+
+
+def test_nested_customer_aggregate_grounding():
+    """Verify customer_aggregate numbers (124 high-risk patients) are grounded and invented counts rejected."""
+    setup_standard_context()
+    merchant = context_store.get("merchant", "m_meera")
+    category = context_store.get("category", "dentists")
+    trigger = context_store.get("trigger", "trg_perf_01")
+
+    compact_ctx = build_compact_context(merchant, category, trigger)
+    ledger = build_evidence_ledger(compact_ctx)
+
+    # Valid: 124 patients in cohort
+    grounded_msg = "Dr. Meera Dental Clinic, you have 124 high-risk adult patients. Should we review your recall schedule?"
+    valid, reason = validate_message(grounded_msg, ledger)
+    assert valid, f"Expected valid, got: {reason}"
+
+    # Invalid: fabricated 450 patients
+    hallucinated_msg = "Dr. Meera Dental Clinic, you have 450 high-risk adult patients. Should we review your recall schedule?"
+    valid, reason = validate_message(hallucinated_msg, ledger)
+    assert not valid
+    assert "Unverified numeric claim '450'" in reason
+
+
+def test_nested_digest_trial_n_and_source_grounding():
+    """Verify digest citations (2,100 patients, JIDA Oct 2026, p.14, 38%) are grounded."""
+    setup_standard_context()
+    merchant = context_store.get("merchant", "m_meera")
+    category = context_store.get("category", "dentists")
+    trigger = {
+        "id": "trg_digest_01",
+        "scope": "merchant",
+        "kind": "research_digest",
+        "merchant_id": "m_meera",
+        "urgency": 2,
+        "payload": {"category": "dentists", "top_item_id": "d_2026W17_jida_fluoride"},
+    }
+
+    compact_ctx = build_compact_context(merchant, category, trigger)
+    ledger = build_evidence_ledger(compact_ctx)
+
+    # Valid message using real trial size and source citation
+    grounded_digest_msg = (
+        "Dr. Meera, JIDA Oct 2026, p.14 published a 2,100-patient trial showing 3-month fluoride recall "
+        "cuts caries 38% better. Want me to draft a patient-ed WhatsApp you can share?"
+    )
+    valid, reason = validate_message(grounded_digest_msg, ledger)
+    assert valid, f"Expected valid, got: {reason}"
+
+    # Hallucinated trial size (e.g. 8,500 patients)
+    fake_trial_msg = (
+        "Dr. Meera, JIDA Oct 2026, p.14 published an 8,500-patient trial showing 3-month fluoride recall "
+        "cuts caries 38% better. Want me to draft a patient-ed WhatsApp you can share?"
+    )
+    valid, reason = validate_message(fake_trial_msg, ledger)
+    assert not valid
+    assert "Unverified numeric claim '8,500'" in reason or "Unverified numeric claim '8500'" in reason
+

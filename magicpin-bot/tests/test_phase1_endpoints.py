@@ -88,4 +88,5 @@ def test_malformed_json_returns_400():
         headers={"Content-Type": "application/json"},
     )
     assert response.status_code == 400
-    assert response.json()["error"] == "malformed_json"
+    assert response.json()["accepted"] is False
+    assert response.json()["reason"] == "malformed_json"

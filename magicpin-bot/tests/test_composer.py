@@ -31,7 +31,7 @@ def clean_stores():
 
 
 def test_category_policies():
-    """Verify category policies exist and contain expected constraints."""
+    """Verify category policies baseline exists and contains expected constraints."""
     assert "dentists" in CATEGORY_POLICIES
     assert "clinical" in CATEGORY_POLICIES["dentists"]
     assert "salons" in CATEGORY_POLICIES
@@ -44,70 +44,218 @@ def test_category_policies():
     assert "conservative" in CATEGORY_POLICIES["pharmacies"]
 
 
-def test_build_compact_context():
-    """Verify compact context only exposes allowed facts with strict boundaries."""
-    merchant = {
-        "merchant_id": "m_001",
-        "category_slug": "dentists",
-        "identity": {"name": "Dr. Meera Dental Clinic", "city": "Delhi", "owner_first_name": "Meera"},
-        "performance": {"ctr": 0.025, "views": 1500},
-        "offers": [{"title": "Scaling & Polishing @ ₹499", "status": "active"}],
-    }
+def test_build_compact_context_nested_schema():
+    """Verify compact context walks real nested payloads (testing-brief.md §3)."""
     category = {
         "slug": "dentists",
-        "display_name": "Dentists & Clinics",
-        "peer_stats": {"avg_ctr": 0.035},
+        "display_name": "Dentists",
+        "voice": {
+            "tone": "peer_clinical",
+            "register": "respectful_collegial",
+            "code_mix": "hindi_english_natural",
+            "vocab_allowed": ["fluoride varnish", "scaling", "caries"],
+            "vocab_taboo": ["guaranteed", "100% safe", "miracle"],
+        },
+        "peer_stats": {
+            "avg_rating": 4.4,
+            "avg_reviews": 62,
+            "avg_ctr": 0.030,
+            "scope": "metro_solo_practices_2026",
+        },
+        "digest": [
+            {
+                "id": "d_2026W17_jida_fluoride",
+                "kind": "research",
+                "title": "3-month fluoride varnish recall outperforms 6-month for high-risk adult caries",
+                "source": "JIDA Oct 2026, p.14",
+                "trial_n": 2100,
+                "patient_segment": "high_risk_adults",
+                "summary": "Multi-center Indian trial shows 38% lower caries recurrence with 3-month vs 6-month recall.",
+                "actionable": "Reassess recall interval for adults flagged high-risk in your charting",
+            }
+        ],
     }
+
+    merchant = {
+        "merchant_id": "m_001_drmeera_dentist_delhi",
+        "category_slug": "dentists",
+        "identity": {
+            "name": "Dr. Meera Dental Clinic",
+            "city": "Delhi",
+            "locality": "Lajpat Nagar",
+            "place_id": "ChIJ_LAJPATNAGAR_DENTIST_001",
+            "verified": True,
+            "languages": ["en", "hi"],
+            "owner_first_name": "Meera",
+        },
+        "subscription": {"status": "active", "plan": "Pro", "days_remaining": 82},
+        "performance": {
+            "window_days": 30,
+            "views": 2410,
+            "calls": 18,
+            "directions": 45,
+            "ctr": 0.021,
+            "delta_7d": {"views_pct": 0.18, "calls_pct": -0.05, "ctr_pct": 0.02},
+        },
+        "offers": [
+            {"id": "o_meera_001", "title": "Dental Cleaning @ ₹299", "status": "active"},
+            {"id": "o_meera_002", "title": "Deep Cleaning @ ₹499", "status": "expired"},
+        ],
+        "customer_aggregate": {
+            "total_unique_ytd": 540,
+            "lapsed_180d_plus": 78,
+            "retention_6mo_pct": 0.38,
+            "high_risk_adult_count": 124,
+        },
+        "signals": ["stale_posts:22d", "ctr_below_peer_median", "high_risk_adult_cohort"],
+    }
+
+    customer = {
+        "customer_id": "c_001_priya",
+        "merchant_id": "m_001_drmeera_dentist_delhi",
+        "identity": {"name": "Priya", "phone_redacted": "+91 98*** 12345", "language_pref": "hi-en mix"},
+        "relationship": {
+            "first_visit": "2025-11-04",
+            "last_visit": "2026-05-12",
+            "visits_total": 4,
+            "services_received": ["cleaning", "cleaning", "whitening", "cleaning"],
+        },
+        "state": "lapsed_soft",
+        "preferences": {"preferred_slots": "weekday_evening", "channel": "whatsapp"},
+    }
+
     trigger = {
-        "id": "trg_001",
-        "kind": "performance_drop",
-        "urgency": 3,
-        "payload": {"metric": "ctr", "delta_pct": -0.20},
+        "id": "trg_001_research_digest_dentists",
+        "scope": "merchant",
+        "kind": "research_digest",
+        "source": "external",
+        "merchant_id": "m_001_drmeera_dentist_delhi",
+        "customer_id": None,
+        "payload": {
+            "category": "dentists",
+            "top_item_id": "d_2026W17_jida_fluoride",
+        },
+        "urgency": 2,
     }
 
     ctx = build_compact_context(
         merchant=merchant,
         category=category,
         trigger=trigger,
-        selected_signal="performance_gap",
+        customer=customer,
+        selected_signal="high_risk_adult_cohort",
     )
 
-    assert "merchant" in ctx
+    # 1. Merchant nested fields
     assert ctx["merchant"]["name"] == "Dr. Meera Dental Clinic"
-    assert "category" in ctx
-    assert ctx["category"]["voice_policy"] == CATEGORY_POLICIES["dentists"]
-    assert "allowed_facts" in ctx
-    assert any("Dr. Meera Dental Clinic" in f for f in ctx["allowed_facts"])
-    assert any("2.5%" in f for f in ctx["allowed_facts"])
-    assert "forbidden_claims" in ctx
-    assert len(ctx["forbidden_claims"]) >= 3
+    assert ctx["merchant"]["owner"] == "Meera"
+    assert ctx["merchant"]["city"] == "Delhi"
+    assert ctx["merchant"]["locality"] == "Lajpat Nagar"
+    assert ctx["merchant"]["performance"]["ctr"] == 0.021
+    assert ctx["merchant"]["performance"]["delta_7d"]["views_pct"] == 0.18
+    assert ctx["merchant"]["customer_aggregate"]["high_risk_adult_count"] == 124
+    assert ctx["merchant"]["active_offers"] == ["Dental Cleaning @ ₹299"]
+
+    # 2. Category dynamic voice
+    assert ctx["category"]["voice"]["tone"] == "peer_clinical"
+    assert "fluoride varnish" in ctx["category"]["voice"]["vocab_allowed"]
+    assert "guaranteed" in ctx["category"]["voice"]["taboos"]
+
+    # 3. Matched Digest
+    assert ctx["digest"] is not None
+    assert ctx["digest"]["source"] == "JIDA Oct 2026, p.14"
+    assert ctx["digest"]["trial_n"] == 2100
+    assert ctx["digest"]["patient_segment"] == "high_risk_adults"
+
+    # 4. Customer
+    assert ctx["customer"]["name"] == "Priya"
+    assert ctx["customer"]["language_pref"] == "hi-en mix"
+
+    # 5. Allowed facts verification
+    facts = ctx["allowed_facts"]
+    assert any("Dr. Meera Dental Clinic" in f for f in facts)
+    assert any("2.1%" in f for f in facts)
+    assert any("+18.0%" in f for f in facts)
+    assert any("124 patients" in f for f in facts)
+    assert any("JIDA Oct 2026, p.14" in f for f in facts)
+    assert any("2,100 patients" in f for f in facts)
+    assert any("Dental Cleaning @ ₹299" in f for f in facts)
 
 
-def test_compose_message_success():
-    """When LLM returns valid JSON matching evidence ledger, the LLM message is accepted."""
-    compact_ctx = {
-        "merchant": {
-            "name": "Dr. Meera Clinic",
-            "active_offers": ["Dental Cleaning @ ₹499"],
+def test_compose_message_with_digest_citations():
+    """When LLM composes research digest message citing real trial numbers, evidence ledger validates it."""
+    category = {
+        "slug": "dentists",
+        "display_name": "Dentists",
+        "voice": {
+            "tone": "peer_clinical",
+            "vocab_allowed": ["fluoride varnish", "caries"],
         },
-        "trigger": {
-            "details": {"delta_pct": 20},
-        },
-        "selected_signal": "test",
+        "digest": [
+            {
+                "id": "d_01",
+                "title": "3-month fluoride recall cuts caries 38% better than 6-month",
+                "source": "JIDA Oct 2026, p.14",
+                "trial_n": 2100,
+                "patient_segment": "high_risk_adults",
+                "summary": "Trial shows 38% lower caries recurrence with 3-month recall.",
+            }
+        ],
     }
-    fallback_data = ("Fallback body", "template_fallback", [], "Fallback rationale")
+    merchant = {
+        "identity": {"name": "Dr. Meera Dental Clinic", "owner_first_name": "Meera"},
+        "performance": {"ctr": 0.021},
+        "customer_aggregate": {"high_risk_adult_count": 124},
+        "offers": [{"title": "Dental Cleaning @ ₹299", "status": "active"}],
+    }
+    trigger = {
+        "id": "trg_01",
+        "kind": "research_digest",
+        "payload": {"top_item_id": "d_01"},
+    }
 
+    compact_ctx = build_compact_context(merchant=merchant, category=category, trigger=trigger)
+    fallback_data = ("Fallback message", "template_fallback", [], "Fallback reason")
+
+    good_message = (
+        "Dr. Meera, JIDA Oct 2026, p.14 published a 2,100-patient trial showing 3-month fluoride recall "
+        "cuts caries 38% better for your high-risk adult patients. Want me to draft a patient-ed WhatsApp?"
+    )
     llm_payload = {
-        "body": "Dr. Meera Clinic, your CTR dipped 20% this week. Want to highlight your Dental Cleaning @ ₹499 offer?",
+        "body": good_message,
         "cta": "open_ended",
-        "rationale": "Directly grounded in recent CTR drop and active offer",
+        "rationale": "Directly grounded in JIDA clinical digest and high-risk adult cohort",
     }
     set_custom_llm_caller(lambda prompt, sys, timeout: json.dumps(llm_payload))
 
     body, tmpl, params, rationale = compose_message(compact_ctx, fallback_data)
-    assert body == llm_payload["body"]
+    assert body == good_message
     assert tmpl == "llm_grounded_composer"
     assert rationale == llm_payload["rationale"]
+
+
+def test_dynamic_voice_policy_overrides_hardcoded():
+    """Verify that category.voice dynamically configures tone and taboos without hardcoded lock-in."""
+    custom_category = {
+        "slug": "custom_specialty",
+        "display_name": "Bespoke Wellness",
+        "voice": {
+            "tone": "mindful_gentle",
+            "register": "intimate_warm",
+            "vocab_allowed": ["balance", "renewal", "serenity"],
+            "taboos": ["hustle", "guaranteed", "fast"],
+        },
+    }
+    ctx = build_compact_context(
+        merchant={"identity": {"name": "Soul Spa"}},
+        category=custom_category,
+        trigger={"id": "t_01", "kind": "seasonal_beat"},
+    )
+    voice = ctx["category"]["voice"]
+    assert voice["tone"] == "mindful_gentle"
+    assert "renewal" in voice["vocab_allowed"]
+    assert "hustle" in voice["taboos"]
+    assert "Tone: mindful_gentle" in ctx["category_voice_policy"]
 
 
 def test_compose_message_timeout_fallback():
@@ -159,12 +307,17 @@ def test_compose_message_exception_fallback():
 
 def test_tick_with_llm_success():
     """POST /v1/tick uses LLM-composed message when available."""
-    context_store.set("category", "dentists", 1, {"slug": "dentists", "display_name": "Dentists"})
+    context_store.set("category", "dentists", 1, {
+        "slug": "dentists",
+        "display_name": "Dentists",
+        "voice": {"tone": "peer_clinical"},
+    })
     context_store.set("merchant", "m_001", 1, {
         "merchant_id": "m_001",
         "category_slug": "dentists",
-        "identity": {"name": "Meera Dental"},
+        "identity": {"name": "Meera Dental", "city": "Delhi"},
         "performance": {"ctr": 0.02},
+        "offers": [{"title": "Dental Cleaning @ ₹299", "status": "active"}],
     })
     context_store.set("trigger", "trg_01", 1, {
         "id": "trg_01",
@@ -174,7 +327,7 @@ def test_tick_with_llm_success():
     })
 
     llm_payload = {
-        "body": "Meera Dental, urgent compliance update for Dentists: new guidelines in effect. Want me to draft a summary?",
+        "body": "Meera Dental, urgent compliance update for Dentists in Delhi. Want me to draft a summary?",
         "cta": "open_ended",
         "rationale": "High priority compliance",
     }
@@ -193,7 +346,11 @@ def test_tick_with_llm_success():
 
 def test_tick_with_llm_timeout_fallback():
     """POST /v1/tick falls back to deterministic template when LLM times out."""
-    context_store.set("category", "dentists", 1, {"slug": "dentists", "display_name": "Dentists", "peer_stats": {"avg_ctr": 0.03}})
+    context_store.set("category", "dentists", 1, {
+        "slug": "dentists",
+        "display_name": "Dentists",
+        "peer_stats": {"avg_ctr": 0.03},
+    })
     context_store.set("merchant", "m_001", 1, {
         "merchant_id": "m_001",
         "category_slug": "dentists",
@@ -281,3 +438,4 @@ def test_tick_with_llm_unavailable_fallback():
     assert len(actions) == 1
     assert "Apex Clinic" in actions[0]["body"]
     assert actions[0]["template_name"] == "template_compliance_alert_v1"
+

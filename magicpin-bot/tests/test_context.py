@@ -81,11 +81,9 @@ def test_older_version():
     })
     assert r2.status_code == 409
     data = r2.json()
-    assert data["error"] == "stale_version"
     assert data["accepted"] is False
+    assert data["reason"] == "stale_version"
     assert data["current_version"] == 2
-    assert data["incoming_version"] == 1
-    assert "detail" in data
 
     # Ensure stored data was NOT overwritten
     stored = context_store.get("customer", "c_001_priya")
@@ -130,8 +128,9 @@ def test_missing_scope():
     response = client.post("/v1/context", json=payload)
     assert response.status_code == 400
     data = response.json()
-    assert data["error"] == "bad_request"
-    assert "scope" in data["detail"].lower()
+    assert data["accepted"] is False
+    assert data["reason"] in ("missing_scope", "invalid_scope")
+    assert "scope" in data["details"].lower()
 
 
 def test_invalid_scope():
@@ -145,8 +144,9 @@ def test_invalid_scope():
     response = client.post("/v1/context", json=payload)
     assert response.status_code == 400
     data = response.json()
-    assert data["error"] == "bad_request"
-    assert "scope" in data["detail"].lower()
+    assert data["accepted"] is False
+    assert data["reason"] == "invalid_scope"
+    assert "scope" in data["details"].lower()
 
 
 def test_missing_context_id():
@@ -160,8 +160,9 @@ def test_missing_context_id():
     response = client.post("/v1/context", json=payload)
     assert response.status_code == 400
     data = response.json()
-    assert data["error"] == "bad_request"
-    assert "context_id" in data["detail"].lower()
+    assert data["accepted"] is False
+    assert data["reason"] == "missing_context_id"
+    assert "context_id" in data["details"].lower()
 
 
 def test_negative_version():
@@ -175,8 +176,9 @@ def test_negative_version():
     response = client.post("/v1/context", json=payload)
     assert response.status_code == 400
     data = response.json()
-    assert data["error"] == "bad_request"
-    assert "version" in data["detail"].lower()
+    assert data["accepted"] is False
+    assert data["reason"] == "invalid_version"
+    assert "version" in data["details"].lower()
 
 
 def test_empty_payload():
@@ -190,8 +192,9 @@ def test_empty_payload():
     response = client.post("/v1/context", json=payload)
     assert response.status_code == 400
     data = response.json()
-    assert data["error"] == "bad_request"
-    assert "payload" in data["detail"].lower()
+    assert data["accepted"] is False
+    assert data["reason"] == "empty_payload"
+    assert "payload" in data["details"].lower()
 
 
 def test_duplicate_request():

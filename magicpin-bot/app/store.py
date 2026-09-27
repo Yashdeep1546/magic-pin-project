@@ -1,6 +1,7 @@
 """In-memory state management for Magicpin Vera bot."""
 
 import threading
+import uuid
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, Optional, Tuple
@@ -11,6 +12,32 @@ class VersionGateResult(str, Enum):
     REPLACED = "replaced"
     IDEMPOTENT = "idempotent"
     STALE = "stale"
+
+
+def format_gate_response(
+    gate_result: VersionGateResult,
+    current_version: Optional[int] = None,
+    ack_id: Optional[str] = None,
+) -> Tuple[int, Dict[str, Any]]:
+    """
+    Maps VersionGateResult to exact contract response per testing-brief.md §2.1:
+    - 200 (accepted, new or replaced or idempotent same version):
+      {"accepted": true, "ack_id": "ack_abc123", "stored_at": "2026-04-26T10:00:00.123Z"}
+    - 409 (stale version conflict):
+      {"accepted": false, "reason": "stale_version", "current_version": 5}
+    """
+    if gate_result == VersionGateResult.STALE:
+        return 409, {
+            "accepted": False,
+            "reason": "stale_version",
+            "current_version": current_version if current_version is not None else 0,
+        }
+
+    return 200, {
+        "accepted": True,
+        "ack_id": ack_id or f"ack_{uuid.uuid4().hex[:8]}",
+        "stored_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 class ContextStore:

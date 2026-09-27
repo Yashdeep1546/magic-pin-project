@@ -13,30 +13,108 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.composer import build_compact_context, compose_message
 from app.models import TickAction
 
-# ---------------------------------------------------------------------------
-# Trigger Priority Table
-# ---------------------------------------------------------------------------
-TRIGGER_PRIORITY: Dict[str, int] = {
-    # Exact names from specification
-    "compliance_alert": 100,
-    "recall_due": 95,
-    "performance_drop": 90,
-    "customer_winback": 80,
-    "research_digest": 70,
-    "festival": 60,
-    "curious_ask": 50,
-    "seasonal": 40,
+import logging
 
-    # Dataset kind / aliases
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Template Families and Trigger Taxonomy (§4.3)
+# ---------------------------------------------------------------------------
+FAMILY_RESEARCH_KNOWLEDGE = "research_knowledge"
+FAMILY_PERFORMANCE = "performance"
+FAMILY_RECALL_LAPSE = "recall_lapse"
+FAMILY_OPPORTUNITY_EVENT = "opportunity_event"
+FAMILY_MILESTONE = "milestone"
+FAMILY_RELATIONSHIP = "relationship"
+FAMILY_GENERIC = "generic_fallback"
+
+# Mapping from taxonomy kind to family
+KIND_TO_FAMILY: Dict[str, str] = {
+    # External triggers (§4.3)
+    "category_research_digest_release": FAMILY_RESEARCH_KNOWLEDGE,
+    "research_digest": FAMILY_RESEARCH_KNOWLEDGE,
+    "research": FAMILY_RESEARCH_KNOWLEDGE,
+    "regulation_change": FAMILY_RESEARCH_KNOWLEDGE,
+    "category_trend_movement": FAMILY_RESEARCH_KNOWLEDGE,
+    "cde_opportunity": FAMILY_RESEARCH_KNOWLEDGE,
+    "festival_upcoming": FAMILY_OPPORTUNITY_EVENT,
+    "festival": FAMILY_OPPORTUNITY_EVENT,
+    "weather_heatwave": FAMILY_OPPORTUNITY_EVENT,
+    "local_news_event": FAMILY_OPPORTUNITY_EVENT,
+    "competitor_opened": FAMILY_OPPORTUNITY_EVENT,
+    "ipl_match_today": FAMILY_OPPORTUNITY_EVENT,
+    "seasonal": FAMILY_OPPORTUNITY_EVENT,
+    "category_seasonal": FAMILY_OPPORTUNITY_EVENT,
+
+    # Internal triggers (§4.3)
+    "perf_spike": FAMILY_PERFORMANCE,
+    "perf_dip": FAMILY_PERFORMANCE,
+    "performance_drop": FAMILY_PERFORMANCE,
+    "performance_dip": FAMILY_PERFORMANCE,
+    "seasonal_perf_dip": FAMILY_PERFORMANCE,
+    "seasonal_acquisition_dip": FAMILY_PERFORMANCE,
+    "milestone_reached": FAMILY_MILESTONE,
+    "dormant_with_vera": FAMILY_RELATIONSHIP,
+    "customer_lapsed_soft": FAMILY_RECALL_LAPSE,
+    "customer_lapsed_hard": FAMILY_RECALL_LAPSE,
+    "appointment_tomorrow": FAMILY_RECALL_LAPSE,
+    "review_theme_emerged": FAMILY_RELATIONSHIP,
+    "scheduled_recurring": FAMILY_RELATIONSHIP,
+    "curious_ask": FAMILY_RELATIONSHIP,
+    "curious_ask_due": FAMILY_RELATIONSHIP,
+
+    # Customer-scoped triggers (§4.4 / engagement loops)
+    "recall_due": FAMILY_RECALL_LAPSE,
+    "unplanned_slot_open": FAMILY_RECALL_LAPSE,
+    "chronic_refill_due": FAMILY_RECALL_LAPSE,
+    "customer_winback": FAMILY_RECALL_LAPSE,
+    "winback_eligible": FAMILY_RECALL_LAPSE,
+    "winback": FAMILY_RECALL_LAPSE,
+
+    # Legacy / alias kinds
+    "compliance_alert": FAMILY_RESEARCH_KNOWLEDGE,
+    "compliance": FAMILY_RESEARCH_KNOWLEDGE,
+}
+
+# Template name overrides for test backwards-compatibility
+TEMPLATE_NAME_OVERRIDES: Dict[str, str] = {
+    "compliance_alert": "template_compliance_alert_v1",
+    "compliance": "template_compliance_alert_v1",
+    "performance_drop": "template_performance_drop_v1",
+    "performance_dip": "template_performance_drop_v1",
+    "recall_due": "template_recall_due_v1",
+    "customer_winback": "template_customer_winback_v1",
+    "winback_eligible": "template_customer_winback_v1",
+    "winback": "template_customer_winback_v1",
+    "research_digest": "template_research_digest_v1",
+    "research": "template_research_digest_v1",
+    "festival": "template_festival_v1",
+    "seasonal": "template_seasonal_v1",
+    "category_seasonal": "template_seasonal_v1",
+    "curious_ask": "template_curious_ask_v1",
+    "curious_ask_due": "template_curious_ask_v1",
+}
+
+# Deprecated: Retained for backward-compatibility with external imports.
+# Prioritization is now data-driven via TriggerContext.urgency (1-5).
+TRIGGER_PRIORITY: Dict[str, int] = {
+    "compliance_alert": 100,
     "regulation_change": 100,
     "compliance": 100,
+    "recall_due": 95,
+    "performance_drop": 90,
     "perf_dip": 90,
     "performance_dip": 90,
+    "customer_winback": 80,
     "winback_eligible": 80,
     "winback": 80,
+    "research_digest": 70,
     "research": 70,
+    "festival": 60,
     "festival_upcoming": 60,
+    "curious_ask": 50,
     "curious_ask_due": 50,
+    "seasonal": 40,
     "seasonal_perf_dip": 40,
     "seasonal_acquisition_dip": 40,
 }
@@ -140,17 +218,23 @@ def resolve_trigger(context_store, trigger_id: Optional[str]) -> Optional[Dict[s
 # Expiry Helper
 # ---------------------------------------------------------------------------
 def is_trigger_expired(trigger: Dict[str, Any], now_iso: Optional[str] = None) -> bool:
-    """Returns True if the trigger has passed its expires_at timestamp."""
+    """Returns True if the trigger has passed its expires_at timestamp.
+
+    Per testing-brief.md §2.2:
+    The expiry check must ALWAYS compare against the 'now' field passed in the
+    /v1/tick request body, never against the server's real wall-clock time.
+    If now_iso is omitted or empty, triggers are not expired by wall-clock time.
+    """
+    if not isinstance(trigger, dict):
+        return False
     expires_at = trigger.get("expires_at")
-    if not expires_at:
+    if not expires_at or not isinstance(expires_at, str):
+        return False
+    if not now_iso or not isinstance(now_iso, str) or not now_iso.strip():
         return False
     try:
-        now_dt = (
-            datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
-            if now_iso
-            else datetime.now(timezone.utc)
-        )
-        exp_dt = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        now_dt = datetime.fromisoformat(now_iso.strip().replace("Z", "+00:00"))
+        exp_dt = datetime.fromisoformat(expires_at.strip().replace("Z", "+00:00"))
         if now_dt.tzinfo is None:
             now_dt = now_dt.replace(tzinfo=timezone.utc)
         if exp_dt.tzinfo is None:
@@ -160,8 +244,9 @@ def is_trigger_expired(trigger: Dict[str, Any], now_iso: Optional[str] = None) -
         return False
 
 
+
 # ---------------------------------------------------------------------------
-# Trigger Scoring
+# Trigger Scoring (Data-driven Urgency 1-5 + Context Relevance)
 # ---------------------------------------------------------------------------
 def score_trigger(
     trigger: Dict[str, Any],
@@ -171,15 +256,18 @@ def score_trigger(
 ) -> int:
     """
     Computes deterministic score for a trigger:
-    score = priority + urgency + merchant_relevance + category_relevance + customer_relevance - suppression_penalty
-    """
-    kind = trigger.get("kind", trigger.get("type", "unknown"))
-    priority = TRIGGER_PRIORITY.get(kind, 30)
+    score = urgency_score + merchant_relevance + category_relevance + customer_relevance - suppression_penalty
 
+    Data-driven approach reading urgency from TriggerContext.urgency (1-5)
+    combined with contextual relevance.
+    """
     try:
-        urgency = int(trigger.get("urgency", 1))
+        raw_urgency = trigger.get("urgency", 1)
+        urgency = int(raw_urgency) if raw_urgency is not None else 1
     except (ValueError, TypeError):
         urgency = 1
+    urgency = max(1, min(5, urgency))
+    urgency_score = urgency * 20
 
     # Merchant relevance
     merchant_relevance = 10 if merchant else 0
@@ -192,7 +280,7 @@ def score_trigger(
         category_relevance += 5
 
     # Customer relevance
-    if trigger.get("customer_id"):
+    if trigger.get("customer_id") or trigger.get("scope") == "customer":
         if customer:
             customer_relevance = 10
             if customer.get("preferences", {}).get("reminder_opt_in") is True:
@@ -206,11 +294,11 @@ def score_trigger(
     suppression_key = trigger.get("suppression_key")
     suppression_penalty = 1000 if check_suppressed(suppression_key) else 0
 
-    return priority + urgency + merchant_relevance + category_relevance + customer_relevance - suppression_penalty
+    return urgency_score + merchant_relevance + category_relevance + customer_relevance - suppression_penalty
 
 
 # ---------------------------------------------------------------------------
-# Deterministic Template Rendering
+# Deterministic Template Rendering (Generic Families)
 # ---------------------------------------------------------------------------
 def _clean_entity_text(val: Optional[str], default: str) -> str:
     if not val or not isinstance(val, str):
@@ -223,6 +311,347 @@ def _clean_entity_text(val: Optional[str], default: str) -> str:
     return cleaned or default
 
 
+def _render_research_knowledge(
+    kind: str,
+    payload: Dict[str, Any],
+    m_name: str,
+    cat_name: str,
+    offer_str: str,
+) -> Tuple[str, str, List[str], str]:
+    if kind in ("regulation_change", "compliance_alert", "compliance") or "deadline_iso" in payload:
+        reg_topic = payload.get("topic") or payload.get("top_item_id") or "regulatory guidelines"
+        body = (
+            f"{m_name}, urgent regulatory update for {cat_name}: {reg_topic} takes effect soon. "
+            f"Reply YES to get the 1-page compliance checklist before the deadline."
+        )
+        template_name = TEMPLATE_NAME_OVERRIDES.get(kind, "template_research_knowledge_v1")
+        template_params = [m_name, cat_name, str(reg_topic)]
+        rationale = f"Regulatory and compliance update ({reg_topic}) for {m_name} in {cat_name}."
+    elif kind == "category_trend_movement" or "trend" in payload or "query" in payload:
+        trend_name = payload.get("trend") or payload.get("query") or payload.get("topic") or f"demand for {cat_name} services"
+        pct = payload.get("delta_pct") or payload.get("growth_pct") or 50
+        pct_str = f"+{round(pct * 100)}%" if isinstance(pct, float) and pct <= 1.0 else f"+{pct}%" if not str(pct).startswith("+") else str(pct)
+        body = (
+            f"{m_name}, search interest for '{trend_name}' in {cat_name} is up {pct_str}. "
+            f"You have {offer_str} active — reply YES to launch a targeted promo before this surge ends."
+        )
+        template_name = TEMPLATE_NAME_OVERRIDES.get(kind, "template_research_knowledge_v1")
+        template_params = [m_name, str(trend_name), pct_str, cat_name, offer_str]
+        rationale = f"Category search trend movement ({trend_name} {pct_str}) relevant to {m_name}."
+    else:
+        top_item = payload.get("top_item")
+        digest_title = (
+            (top_item.get("title") if isinstance(top_item, dict) else None)
+            or payload.get("title")
+            or payload.get("top_item_id")
+            or "actionable peer insights"
+        )
+        body = (
+            f"{m_name}, this week's research digest for {cat_name} highlights: {digest_title}. "
+            f"Reply YES to get the 3-step action checklist for your practice before the weekend."
+        )
+        template_name = TEMPLATE_NAME_OVERRIDES.get(kind, "template_research_knowledge_v1")
+        template_params = [m_name, cat_name, str(digest_title)]
+        rationale = f"Category research digest ({digest_title}) relevant to {m_name} in {cat_name}."
+
+    return body, template_name, template_params, rationale
+
+
+def _render_performance(
+    kind: str,
+    payload: Dict[str, Any],
+    m_name: str,
+    cat_name: str,
+    offer_str: str,
+    merchant: Optional[Dict[str, Any]],
+    category: Optional[Dict[str, Any]],
+) -> Tuple[str, str, List[str], str]:
+    if kind == "perf_spike":
+        metric = payload.get("metric", "views")
+        delta = payload.get("delta_pct", 0.25)
+        pct_str = f"+{round(delta * 100)}%" if isinstance(delta, float) and delta <= 1.0 else f"+{delta}%" if not str(delta).startswith("+") else str(delta)
+        driver = payload.get("likely_driver")
+        driver_str = f" likely driven by {driver.replace('_', ' ')}" if driver else ""
+        body = (
+            f"{m_name}, great momentum! Your {metric} jumped {pct_str} this week{driver_str}. "
+            f"Reply YES to launch a follow-up offer and convert this traffic before it cools."
+        )
+        template_name = TEMPLATE_NAME_OVERRIDES.get(kind, "template_performance_v1")
+        template_params = [m_name, str(metric), pct_str, offer_str]
+        rationale = f"Performance spike ({pct_str} in {metric}) detected for {m_name}."
+    else:
+        perf = merchant.get("performance", {}) if merchant else {}
+        ctr_val = round(perf.get("ctr", 0.021) * 100, 1)
+        peer_stats = category.get("peer_stats", {}) if category else {}
+        peer_ctr_val = round(peer_stats.get("avg_ctr", 0.030) * 100, 1)
+
+        metric = payload.get("metric")
+        delta = payload.get("delta_pct")
+        if metric and delta and metric != "ctr":
+            drop_str = f"{abs(round(delta * 100))}%" if isinstance(delta, float) and abs(delta) <= 1.0 else f"{abs(delta)}%"
+            body = (
+                f"{m_name}, your {metric} dipped {drop_str} this week vs peer average for {cat_name}. "
+                f"You already have {offer_str} active — reply YES to boost visibility before this dip widens."
+            )
+            template_params = [m_name, str(metric), drop_str, cat_name, offer_str]
+            rationale = f"Detected performance drop in {metric} ({drop_str}) for {m_name}."
+        else:
+            body = (
+                f"{m_name}, your CTR is {ctr_val}% vs {peer_ctr_val}% for {cat_name} peers. "
+                f"You already have {offer_str} active — reply YES to boost visibility before this dip widens."
+            )
+            template_params = [m_name, str(ctr_val), str(peer_ctr_val), cat_name, offer_str]
+            rationale = f"Detected performance drop in CTR for {m_name} compared to {cat_name} peers."
+
+        template_name = TEMPLATE_NAME_OVERRIDES.get(kind, "template_performance_drop_v1")
+
+    return body, template_name, template_params, rationale
+
+
+def _render_recall_lapse(
+    kind: str,
+    payload: Dict[str, Any],
+    m_name: str,
+    cat_name: str,
+    offer_str: str,
+    customer: Optional[Dict[str, Any]],
+) -> Tuple[str, str, List[str], str]:
+    if kind == "appointment_tomorrow":
+        cust_name = customer.get("identity", {}).get("name") if customer else "Your customer"
+        appt_time = payload.get("time") or payload.get("slot") or "tomorrow"
+        body = (
+            f"{m_name}, {cust_name} has an appointment scheduled for {appt_time}. "
+            f"Reply YES to send the appointment reminder and prep instructions now."
+        )
+        template_name = TEMPLATE_NAME_OVERRIDES.get(kind, "template_recall_lapse_v1")
+        template_params = [m_name, str(cust_name), str(appt_time)]
+        rationale = f"Upcoming appointment reminder for {cust_name} at {m_name}."
+    elif kind == "unplanned_slot_open":
+        slot_time = payload.get("slot") or payload.get("time") or "an open slot tomorrow"
+        body = (
+            f"{m_name}, you have {slot_time} open. "
+            f"Reply YES to reach out to nearby lapsed regulars due for a visit before the slot goes wasted."
+        )
+        template_name = TEMPLATE_NAME_OVERRIDES.get(kind, "template_recall_lapse_v1")
+        template_params = [m_name, str(slot_time)]
+        rationale = f"Capacity optimization for unplanned open slot ({slot_time}) at {m_name}."
+    elif kind in ("recall_due", "chronic_refill_due"):
+        cust_name = customer.get("identity", {}).get("name") if customer else "Your customer"
+        service = (
+            payload.get("service_due")
+            or payload.get("service")
+            or payload.get("medicine_name")
+            or "scheduled service"
+        )
+        body = (
+            f"{m_name}, {cust_name} is due for {service}. "
+            f"Reply YES to send the recall invite before their preferred slots fill up."
+        )
+        template_name = TEMPLATE_NAME_OVERRIDES.get(kind, "template_recall_lapse_v1")
+        template_params = [m_name, str(cust_name), str(service)]
+        rationale = f"Service recall due for {cust_name} at {m_name}."
+    elif kind in ("customer_winback", "winback_eligible", "winback"):
+        body = (
+            f"{m_name}, several past customers haven't visited in over 60 days. "
+            f"Reply YES to send a targeted winback offer before they switch to competitors."
+        )
+        template_name = TEMPLATE_NAME_OVERRIDES.get(kind, "template_customer_winback_v1")
+        template_params = [m_name]
+        rationale = f"Winback opportunity identified for lapsed customers of {m_name}."
+    else:  # customer_lapsed_soft, customer_lapsed_hard
+        if customer:
+            cust_name = customer.get("identity", {}).get("name", "A regular customer")
+            body = (
+                f"{m_name}, {cust_name} hasn't visited in over 60 days. "
+                f"Reply YES to send a targeted re-engagement offer before they switch to competitors."
+            )
+            template_params = [m_name, str(cust_name)]
+            rationale = f"Winback opportunity identified for {cust_name} at {m_name}."
+        else:
+            body = (
+                f"{m_name}, several past customers haven't visited in over 60 days. "
+                f"Reply YES to send a targeted winback offer before they switch to competitors."
+            )
+            template_params = [m_name]
+            rationale = f"Winback opportunity identified for lapsed customers of {m_name}."
+        template_name = TEMPLATE_NAME_OVERRIDES.get(kind, "template_recall_lapse_v1")
+
+    return body, template_name, template_params, rationale
+
+
+def _render_opportunity_event(
+    kind: str,
+    payload: Dict[str, Any],
+    m_name: str,
+    cat_name: str,
+    offer_str: str,
+) -> Tuple[str, str, List[str], str]:
+    if kind in ("festival_upcoming", "festival"):
+        festival_name = (
+            payload.get("festival")
+            or payload.get("festival_name")
+            or "upcoming festival"
+        )
+        days = payload.get("days_until", 7)
+        body = (
+            f"{m_name}, {festival_name} is in {days} days! Peers in {cat_name} are launching festive offers. "
+            f"Reply YES to lock in your festive campaign before competitor bookings open."
+        )
+        template_name = TEMPLATE_NAME_OVERRIDES.get(kind, "template_opportunity_event_v1")
+        template_params = [m_name, str(festival_name), str(days), cat_name]
+        rationale = f"Festive demand spike approaching for {festival_name}."
+    elif kind == "weather_heatwave":
+        temp = payload.get("temp_c") or payload.get("temperature") or "42°C"
+        temp_str = f"{temp}°C" if isinstance(temp, (int, float)) or (isinstance(temp, str) and not temp.endswith("C")) else str(temp)
+        city = payload.get("city") or "your area"
+        body = (
+            f"{m_name}, heatwave alert ({temp_str}) in {city} today. "
+            f"Reply YES to launch a weather-timed footfall promotion before the afternoon rush."
+        )
+        template_name = TEMPLATE_NAME_OVERRIDES.get(kind, "template_opportunity_event_v1")
+        template_params = [m_name, temp_str, str(city), cat_name]
+        rationale = f"Weather heatwave opportunity ({temp_str}) for {m_name} in {city}."
+    elif kind == "local_news_event":
+        news = payload.get("event") or payload.get("headline") or payload.get("summary") or "a local traffic advisory"
+        body = (
+            f"{m_name}, local update: {news}. "
+            f"Reply YES to send this advisory update to scheduled customers now."
+        )
+        template_name = TEMPLATE_NAME_OVERRIDES.get(kind, "template_opportunity_event_v1")
+        template_params = [m_name, str(news)]
+        rationale = f"Local news event ({news}) affecting {m_name}."
+    elif kind == "competitor_opened":
+        comp_name = payload.get("competitor_name") or "A new competitor"
+        dist = payload.get("distance_km", 1.5)
+        dist_str = f"{dist}km away" if isinstance(dist, (int, float)) else str(dist)
+        body = (
+            f"{m_name}, heads-up: {comp_name} recently opened {dist_str}. "
+            f"You have {offer_str} active — reply YES to highlight your unique offer before customers look elsewhere."
+        )
+        template_name = TEMPLATE_NAME_OVERRIDES.get(kind, "template_opportunity_event_v1")
+        template_params = [m_name, str(comp_name), dist_str, offer_str]
+        rationale = f"New competitor ({comp_name}, {dist_str}) opened near {m_name}."
+    elif kind in ("seasonal", "category_seasonal"):
+        season_name = payload.get("season", "seasonal")
+        body = (
+            f"{m_name}, {season_name} trends for {cat_name} are active. "
+            f"Reply YES to get the seasonal growth checklist before the demand window closes."
+        )
+        template_name = TEMPLATE_NAME_OVERRIDES.get(kind, "template_opportunity_event_v1")
+        template_params = [m_name, str(season_name), cat_name]
+        rationale = f"Seasonal trend adaptation for {m_name} in {cat_name}."
+    elif kind == "ipl_match_today":
+        match = payload.get("match") or "big match today"
+        body = (
+            f"{m_name}, match day alert: {match}! "
+            f"Reply YES to launch your match-day promotion before toss time."
+        )
+        template_name = TEMPLATE_NAME_OVERRIDES.get(kind, "template_opportunity_event_v1")
+        template_params = [m_name, str(match), cat_name]
+        rationale = f"Sports match event opportunity for {m_name}."
+    else:
+        body = (
+            f"{m_name}, an opportunity has come up for your {cat_name} business. "
+            f"Reply YES to activate a promotion around {offer_str} before the weekend rush."
+        )
+        template_name = TEMPLATE_NAME_OVERRIDES.get(kind, "template_opportunity_event_v1")
+        template_params = [m_name, cat_name, offer_str]
+        rationale = f"Opportunity event detected for {m_name}."
+
+    return body, template_name, template_params, rationale
+
+
+def _render_milestone(
+    kind: str,
+    payload: Dict[str, Any],
+    m_name: str,
+    cat_name: str,
+    offer_str: str,
+) -> Tuple[str, str, List[str], str]:
+    metric = str(payload.get("metric", "reviews")).replace("_", " ")
+    if payload.get("is_imminent"):
+        target = payload.get("milestone_value", 100)
+        now_val = payload.get("value_now", target - 5)
+        remaining = max(1, target - now_val)
+        body = (
+            f"{m_name}, exciting news! You are at {now_val} {metric} — just {remaining} away from your {target} milestone! "
+            f"Reply YES to launch a quick push and cross the milestone this week."
+        )
+        template_params = [m_name, str(now_val), str(target), metric]
+        rationale = f"Approaching milestone ({now_val}/{target} {metric}) for {m_name}."
+    else:
+        milestone = payload.get("milestone_value") or payload.get("milestone") or "100"
+        body = (
+            f"{m_name}, congratulations on crossing {milestone} {metric}! "
+            f"Reply YES to post a thank-you customer reward before the celebration momentum fades."
+        )
+        template_params = [m_name, str(milestone), metric]
+        rationale = f"Milestone achieved ({milestone} {metric}) for {m_name}."
+
+    template_name = TEMPLATE_NAME_OVERRIDES.get(kind, "template_milestone_v1")
+    return body, template_name, template_params, rationale
+
+
+def _render_relationship(
+    kind: str,
+    payload: Dict[str, Any],
+    m_name: str,
+    cat_name: str,
+    offer_str: str,
+) -> Tuple[str, str, List[str], str]:
+    if kind == "review_theme_emerged":
+        theme = str(payload.get("theme", "service speed")).replace("_", " ")
+        count = payload.get("occurrences_30d", 3)
+        body = (
+            f"{m_name}, we noticed {count} recent customer reviews mentioning '{theme}'. "
+            f"Reply YES to see the 3-step action plan to address this review feedback before ratings drop."
+        )
+        template_name = TEMPLATE_NAME_OVERRIDES.get(kind, "template_relationship_v1")
+        template_params = [m_name, str(theme), str(count)]
+        rationale = f"Customer review theme '{theme}' emerged for {m_name} ({count} mentions)."
+    elif kind == "dormant_with_vera":
+        days = payload.get("days_since_last_merchant_message", 14)
+        body = (
+            f"{m_name}, Vera here from magicpin. It has been {days} days since our last chat — "
+            f"reply YES to see your top 3 growth opportunities for {cat_name} this week."
+        )
+        template_name = TEMPLATE_NAME_OVERRIDES.get(kind, "template_relationship_v1")
+        template_params = [m_name, str(days), cat_name]
+        rationale = f"Dormancy check-in for {m_name} ({days} days inactive with Vera)."
+    else:  # scheduled_recurring, curious_ask, curious_ask_due
+        body = (
+            f"{m_name}, quick check-in: what services or items are seeing the highest customer demand at your location this week?"
+        )
+        template_name = TEMPLATE_NAME_OVERRIDES.get(kind, "template_curious_ask_v1")
+        template_params = [m_name]
+        rationale = f"Scheduled proactive check-in to gather customer demand signals for {m_name}."
+
+    return body, template_name, template_params, rationale
+
+
+def _render_generic_fallback(
+    kind: str,
+    trigger_id: Optional[str],
+    m_name: str,
+    cat_name: str,
+    offer_str: str,
+) -> Tuple[str, str, List[str], str]:
+    logger.warning(
+        "Unmatched trigger kind '%s' falling back to generic family. Trigger ID: %s",
+        kind,
+        trigger_id,
+    )
+    body = (
+        f"{m_name}, Vera here from magicpin. We noticed an opportunity for your {cat_name} business. "
+        f"You have {offer_str} active — reply YES to launch recommendations before the weekend."
+    )
+    template_name = "template_default_v1"
+    template_params = [m_name, cat_name, offer_str]
+    rationale = f"Safe generic fallback for unhandled trigger kind '{kind}' at {m_name}."
+    return body, template_name, template_params, rationale
+    return body, template_name, template_params, rationale
+
+
 def render_template(
     trigger: Dict[str, Any],
     merchant: Optional[Dict[str, Any]],
@@ -230,10 +659,15 @@ def render_template(
     customer: Optional[Dict[str, Any]],
 ) -> Tuple[str, str, List[str], str]:
     """
-    Renders deterministic message body, template name, template parameters, and rationale.
+    Renders deterministic message body, template name, template parameters, and rationale
+    based on template families and trigger payload shape.
     Returns: (body, template_name, template_params, rationale)
     """
     kind = trigger.get("kind", trigger.get("type", "default"))
+    payload = trigger.get("payload", {})
+    if not isinstance(payload, dict):
+        payload = {}
+
     raw_m_name = (
         merchant.get("identity", {}).get("name")
         or merchant.get("name")
@@ -251,110 +685,22 @@ def render_template(
     ] if merchant else []
     offer_str = active_offers[0] if active_offers else "an active promotion"
 
-    # 1. Performance drop / perf_dip
-    if kind in ("performance_drop", "perf_dip", "performance_dip"):
-        perf = merchant.get("performance", {}) if merchant else {}
-        ctr_val = round(perf.get("ctr", 0.021) * 100, 1)
-        peer_stats = category.get("peer_stats", {}) if category else {}
-        peer_ctr_val = round(peer_stats.get("avg_ctr", 0.030) * 100, 1)
+    family = KIND_TO_FAMILY.get(kind)
 
-        body = (
-            f"{m_name}, your CTR is {ctr_val}% vs {peer_ctr_val}% for {cat_name} peers. "
-            f"You already have {offer_str}. Want me to draft a message around it?"
-        )
-        template_name = "template_performance_drop_v1"
-        template_params = [m_name, str(ctr_val), str(peer_ctr_val), cat_name, offer_str]
-        rationale = f"Detected performance drop in CTR for {m_name} compared to {cat_name} peers."
-
-    # 2. Compliance alert / regulation_change
-    elif kind in ("compliance_alert", "regulation_change", "compliance"):
-        body = (
-            f"{m_name}, urgent compliance alert for {cat_name}: regulatory updates take effect soon. "
-            f"Would you like a 1-page summary of required action items?"
-        )
-        template_name = "template_compliance_alert_v1"
-        template_params = [m_name, cat_name]
-        rationale = f"High-priority compliance alert regarding regulatory changes in {cat_name}."
-
-    # 3. Recall due
-    elif kind in ("recall_due",):
-        cust_name = customer.get("identity", {}).get("name") if customer else "Your customer"
-        service = trigger.get("payload", {}).get("service_due", "scheduled service")
-        body = (
-            f"{m_name}, {cust_name} is due for {service}. "
-            f"Would you like me to send a friendly recall message with available appointment slots?"
-        )
-        template_name = "template_recall_due_v1"
-        template_params = [m_name, str(cust_name), str(service)]
-        rationale = f"Service recall due for {cust_name} at {m_name}."
-
-    # 4. Customer winback / winback_eligible
-    elif kind in ("customer_winback", "winback_eligible", "winback"):
-        body = (
-            f"{m_name}, several past customers haven't visited in over 60 days. "
-            f"Want me to draft a targeted winback offer to re-engage them?"
-        )
-        template_name = "template_customer_winback_v1"
-        template_params = [m_name]
-        rationale = f"Winback opportunity identified for lapsed customers of {m_name}."
-
-    # 5. Research digest / research
-    elif kind in ("research_digest", "research"):
-        body = (
-            f"{m_name}, this week's research digest for {cat_name} highlights actionable findings. "
-            f"Would you like me to share key takeaways for your practice?"
-        )
-        template_name = "template_research_digest_v1"
-        template_params = [m_name, cat_name]
-        rationale = f"Category research digest relevant to {m_name}."
-
-    # 6. Festival / festival_upcoming
-    elif kind in ("festival", "festival_upcoming"):
-        festival_name = (
-            trigger.get("payload", {}).get("festival")
-            or trigger.get("payload", {}).get("festival_name")
-            or "upcoming festival"
-        )
-        days = trigger.get("payload", {}).get("days_until", 7)
-        body = (
-            f"{m_name}, {festival_name} is in {days} days! Peers in {cat_name} are launching festive offers. "
-            f"Want me to prepare a promotion?"
-        )
-        template_name = "template_festival_v1"
-        template_params = [m_name, str(festival_name), str(days), cat_name]
-        rationale = f"Festive demand spike approaching for {festival_name}."
-
-    # 7. Curious ask
-    elif kind in ("curious_ask", "curious_ask_due"):
-        body = (
-            f"{m_name}, quick check-in: what services or items are seeing the highest customer demand at your location this week?"
-        )
-        template_name = "template_curious_ask_v1"
-        template_params = [m_name]
-        rationale = f"Proactive check-in with merchant to gather current service demand signals."
-
-    # 8. Seasonal / seasonal_perf_dip
-    elif kind in ("seasonal", "seasonal_perf_dip", "seasonal_acquisition_dip"):
-        season_name = trigger.get("payload", {}).get("season", "seasonal")
-        body = (
-            f"{m_name}, {season_name} trends for {cat_name} are active. "
-            f"Would you like to review seasonal demand trends and growth recommendations?"
-        )
-        template_name = "template_seasonal_v1"
-        template_params = [m_name, str(season_name), cat_name]
-        rationale = f"Seasonal trend adaptation for {m_name} in {cat_name}."
-
-    # Default fallback
+    if family == FAMILY_RESEARCH_KNOWLEDGE:
+        return _render_research_knowledge(kind, payload, m_name, cat_name, offer_str)
+    elif family == FAMILY_PERFORMANCE:
+        return _render_performance(kind, payload, m_name, cat_name, offer_str, merchant, category)
+    elif family == FAMILY_RECALL_LAPSE:
+        return _render_recall_lapse(kind, payload, m_name, cat_name, offer_str, customer)
+    elif family == FAMILY_OPPORTUNITY_EVENT:
+        return _render_opportunity_event(kind, payload, m_name, cat_name, offer_str)
+    elif family == FAMILY_MILESTONE:
+        return _render_milestone(kind, payload, m_name, cat_name, offer_str)
+    elif family == FAMILY_RELATIONSHIP:
+        return _render_relationship(kind, payload, m_name, cat_name, offer_str)
     else:
-        body = (
-            f"{m_name}, Vera here from magicpin. We noticed an opportunity for your {cat_name} business. "
-            f"Want me to share recommendations?"
-        )
-        template_name = "template_default_v1"
-        template_params = [m_name, cat_name]
-        rationale = f"General proactive engagement for {m_name}."
-
-    return body, template_name, template_params, rationale
+        return _render_generic_fallback(kind, trigger.get("id"), m_name, cat_name, offer_str)
 
 
 # ---------------------------------------------------------------------------
@@ -424,8 +770,8 @@ def select_strongest_signal(
     if not qualified:
         return None
 
-    # Sort descending by score
-    qualified.sort(key=lambda item: item[0], reverse=True)
+    # Sort descending by score, tie-breaking by trigger ID for stability
+    qualified.sort(key=lambda item: (item[0], str(item[1].get("id", ""))), reverse=True)
     return qualified[0][1]
 
 
@@ -514,12 +860,12 @@ def process_tick(
 
     selected_per_merchant = []
     for mid, group in merchant_groups.items():
-        # Best trigger for this merchant
-        group.sort(key=lambda x: x["score"], reverse=True)
+        # Best trigger for this merchant (tie-break by trigger id)
+        group.sort(key=lambda x: (x["score"], str(x["trigger"].get("id", ""))), reverse=True)
         selected_per_merchant.append(group[0])
 
-    # Rank all merchants' best triggers by score descending
-    selected_per_merchant.sort(key=lambda x: x["score"], reverse=True)
+    # Rank all merchants' best triggers by score descending (tie-break by merchant_id)
+    selected_per_merchant.sort(key=lambda x: (x["score"], str(x["merchant_id"])), reverse=True)
 
     # Cap at 20 actions per tick
     selected_actions_data = selected_per_merchant[:20]

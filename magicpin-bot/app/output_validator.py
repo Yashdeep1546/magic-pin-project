@@ -27,25 +27,35 @@ class EvidenceLedger:
 
 
 def _normalize_num(val: Any) -> Set[str]:
-    """Generate string representations of a numeric value."""
+    """Generate string representations of a numeric value, supporting comma-formatting and percentages."""
     res = set()
+    if val is None:
+        return res
+    s_val = str(val).strip().replace(",", "")
     try:
-        f = float(val)
-        # Raw string
-        res.add(str(val).strip())
+        f = float(s_val)
+        # Raw string and clean string
+        res.add(s_val)
         # Integer representation if whole
         if f.is_integer():
-            res.add(str(int(f)))
+            int_val = int(f)
+            res.add(str(int_val))
+            res.add(f"{int_val:,}")  # e.g. "2,100"
         # Standard decimal formats
         res.add(f"{f:.1f}")
         res.add(f"{f:.2f}")
-        # If float represents a percentage (e.g. 0.021 -> 2.1, 2.1%)
-        if 0 < f < 1:
-            pct = f * 100
+        # Percentage formatting
+        abs_f = abs(f)
+        if 0 < abs_f < 1:
+            pct = abs_f * 100
             res.add(f"{pct:.1f}")
             res.add(f"{pct:.2f}")
             if pct.is_integer():
                 res.add(str(int(pct)))
+            signed_pct = f * 100
+            res.add(f"{signed_pct:.1f}")
+            if signed_pct.is_integer():
+                res.add(str(int(signed_pct)))
     except (ValueError, TypeError):
         pass
     return res
@@ -54,56 +64,146 @@ def _normalize_num(val: Any) -> Set[str]:
 def build_evidence_ledger(compact_context: Dict[str, Any]) -> EvidenceLedger:
     """
     Extracts an evidence ledger from compact context:
-    - Every numeric fact (metrics, percentages, counts, prices, days)
-    - Active offer titles
+    - Every numeric fact from performance, delta_7d, customer_aggregate, peer_stats, digest
+    - Active offer titles and prices
     - Merchant, owner, customer, and category names
-    - Clinical/research/festival anchor terms
+    - Clinical/research/digest citations (source + trial_n) and anchors
     """
     ledger = EvidenceLedger()
 
-    # 1. Allowed numbers
-    # Single-digit common structural counts (e.g. 1 question, 1 page)
-    ledger.allowed_numbers.add("1")
+    # Automatically unwrap if envelope was passed directly
+    if isinstance(compact_context, dict) and "payload" in compact_context and isinstance(compact_context["payload"], dict):
+        compact_context = compact_context["payload"]
 
-    # Merchant performance numbers
+    # 1. Allowed numbers
+    # Common conversational structural counts (e.g. 1 question, 2-min abstract, 3-mo recall, 2 slots)
+    ledger.allowed_numbers.update({"1", "2", "3", "4", "5"})
+
+    # Merchant performance numbers (including delta_7d)
     merchant = compact_context.get("merchant", {})
     perf = merchant.get("performance", {})
-    for k, v in perf.items():
-        if v is not None:
-            ledger.raw_facts.append((f"perf_{k}", v))
-            ledger.allowed_numbers.update(_normalize_num(v))
+    if isinstance(perf, dict):
+        for k, v in perf.items():
+            if k == "delta_7d" and isinstance(v, dict):
+                ledger.allowed_numbers.add("7")
+                for dk, dv in v.items():
+                    if dv is not None:
+                        ledger.raw_facts.append((f"perf_delta_{dk}", dv))
+                        ledger.allowed_numbers.update(_normalize_num(dv))
+            elif v is not None and isinstance(v, (int, float)):
+                ledger.raw_facts.append((f"perf_{k}", v))
+                ledger.allowed_numbers.update(_normalize_num(v))
+
+    # Merchant customer aggregate numbers
+    cust_agg = merchant.get("customer_aggregate", {})
+    if isinstance(cust_agg, dict):
+        for k, v in cust_agg.items():
+            if isinstance(v, (int, float)):
+                ledger.raw_facts.append((f"cust_agg_{k}", v))
+                ledger.allowed_numbers.update(_normalize_num(v))
+        if cust_agg.get("high_risk_adult_count") is not None:
+            ledger.anchors.update({"high_risk_adults", "high-risk adult", "high-risk", "high risk"})
+
+    # Merchant signals
+    signals = merchant.get("signals", [])
+    if isinstance(signals, list):
+        for sig in signals:
+            if isinstance(sig, str):
+                ledger.anchors.add(sig.lower())
+                ledger.anchors.add(sig.replace("_", " ").replace(":", " ").lower())
+                for num in re.findall(r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?", sig):
+                    ledger.allowed_numbers.update(_normalize_num(num))
 
     # Peer stats numbers
     category = compact_context.get("category", {})
+    peer_stats = category.get("peer_stats", {})
+    if isinstance(peer_stats, dict):
+        for pk, pv in peer_stats.items():
+            if isinstance(pv, (int, float)):
+                ledger.raw_facts.append((f"peer_{pk}", pv))
+                ledger.allowed_numbers.update(_normalize_num(pv))
     peer_avg_ctr = category.get("peer_avg_ctr")
     if peer_avg_ctr is not None:
         ledger.raw_facts.append(("peer_avg_ctr", peer_avg_ctr))
         ledger.allowed_numbers.update(_normalize_num(peer_avg_ctr))
 
+    # Category voice allowed vocab anchors
+    voice = category.get("voice", {})
+    if isinstance(voice, dict):
+        vocab_allowed = voice.get("vocab_allowed", [])
+        if isinstance(vocab_allowed, list):
+            for term in vocab_allowed:
+                if isinstance(term, str):
+                    ledger.anchors.add(term.lower())
+                    for num in re.findall(r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?", term):
+                        ledger.allowed_numbers.update(_normalize_num(num))
+
+    # Digest citations and facts
+    digests_to_scan = []
+    if compact_context.get("digest"):
+        digests_to_scan.append(compact_context["digest"])
+    if isinstance(category.get("digest"), list):
+        digests_to_scan.extend([d for d in category["digest"] if isinstance(d, dict)])
+    for d in digests_to_scan:
+        trial_n = d.get("trial_n")
+        if trial_n is not None:
+            ledger.raw_facts.append(("digest_trial_n", trial_n))
+            ledger.allowed_numbers.update(_normalize_num(trial_n))
+        source = d.get("source")
+        if source and isinstance(source, str):
+            ledger.anchors.add(source.lower())
+            for tok in re.findall(r"\b[A-Za-z0-9\.\-]+\b", source):
+                if len(tok) >= 2:
+                    ledger.anchors.add(tok.lower())
+            for num in re.findall(r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?", source):
+                ledger.allowed_numbers.update(_normalize_num(num))
+        title = d.get("title")
+        if title and isinstance(title, str):
+            ledger.anchors.add(title.lower())
+            for num in re.findall(r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?", title):
+                ledger.allowed_numbers.update(_normalize_num(num))
+            for key_term in ("caries", "fluoride", "recall", "radiograph", "dose", "iopa", "rvg"):
+                if key_term in title.lower():
+                    ledger.anchors.add(key_term)
+        summary = d.get("summary")
+        if summary and isinstance(summary, str):
+            for num in re.findall(r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?", summary):
+                ledger.allowed_numbers.update(_normalize_num(num))
+        pseg = d.get("patient_segment")
+        if pseg and isinstance(pseg, str):
+            ledger.anchors.add(pseg.lower())
+            ledger.anchors.add(pseg.replace("_", " ").lower())
+            ledger.anchors.add(pseg.replace("_", "-").lower())
+
     # Trigger payload numbers & anchors
     trigger = compact_context.get("trigger", {})
     trg_details = trigger.get("details", {})
-    for k, v in trg_details.items():
-        if isinstance(v, (int, float)):
-            ledger.raw_facts.append((f"trigger_{k}", v))
-            ledger.allowed_numbers.update(_normalize_num(v))
-        elif isinstance(v, str):
-            # Extract numbers from string values (e.g. "6_month_cleaning" -> 6)
-            for num in re.findall(r"\b\d+(?:\.\d+)?\b", v):
-                ledger.allowed_numbers.update(_normalize_num(num))
-            ledger.anchors.add(v.strip().lower())
+    if isinstance(trg_details, dict):
+        for k, v in trg_details.items():
+            if isinstance(v, (int, float)):
+                ledger.raw_facts.append((f"trigger_{k}", v))
+                ledger.allowed_numbers.update(_normalize_num(v))
+            elif isinstance(v, str):
+                for num in re.findall(r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?", v):
+                    ledger.allowed_numbers.update(_normalize_num(num))
+                ledger.anchors.add(v.strip().lower())
 
     # Active offers and prices
     offers = merchant.get("active_offers", [])
+    if not offers and isinstance(merchant.get("offers"), list):
+        offers = [
+            o.get("title")
+            for o in merchant.get("offers", [])
+            if isinstance(o, dict) and o.get("status") == "active" and o.get("title")
+        ]
     for off in offers:
-        ledger.allowed_offers.append(off.strip().lower())
-        ledger.raw_facts.append(("offer", off))
-        # Extract prices / numbers from offer string (e.g. ₹299 -> 299)
-        for num in re.findall(r"\d+(?:\.\d+)?", off):
-            ledger.allowed_numbers.update(_normalize_num(num))
+        if isinstance(off, str):
+            ledger.allowed_offers.append(off.strip().lower())
+            ledger.raw_facts.append(("offer", off))
+            for num in re.findall(r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?", off):
+                ledger.allowed_numbers.update(_normalize_num(num))
 
     # 2. Proper Nouns & Names
-    # Merchant & owner names
     STOP_NAME_WORDS = {
         "system", "prompt", "instructions", "ignore", "reveal", "override",
         "drop", "table", "merchants", "rules", "reasoning", "internal", "hacked",
@@ -125,6 +225,17 @@ def build_evidence_ledger(compact_context: Dict[str, Any]) -> EvidenceLedger:
         clean_owner = re.sub(r"(?i)(?:system\s+override|\[system\])", "", m_owner).strip()
         if clean_owner:
             ledger.merchant_names.add(clean_owner.lower())
+            ledger.merchant_names.add(f"dr. {clean_owner.lower()}")
+
+    m_city = merchant.get("city")
+    if m_city and isinstance(m_city, str):
+        ledger.anchors.add(m_city.strip().lower())
+
+    m_locality = merchant.get("locality")
+    if m_locality and isinstance(m_locality, str):
+        ledger.anchors.add(m_locality.strip().lower())
+        for word in re.findall(r"\b[A-Za-z]{3,}\b", m_locality):
+            ledger.anchors.add(word.lower())
 
     # Category name
     c_name = category.get("name")
@@ -140,17 +251,31 @@ def build_evidence_ledger(compact_context: Dict[str, Any]) -> EvidenceLedger:
     if c_slug:
         ledger.category_names.add(c_slug.strip().lower())
 
-    # Customer name
+    # Customer name & relationship
     customer = compact_context.get("customer")
-    if customer and customer.get("name"):
-        cust_name = customer["name"].strip()
-        ledger.customer_names.add(cust_name.lower())
-        for word in re.findall(r"\b[A-Za-z]{3,}\b", cust_name):
-            ledger.customer_names.add(word.lower())
+    if isinstance(customer, dict):
+        cust_name = customer.get("name")
+        if cust_name:
+            cname_str = cust_name.strip()
+            ledger.customer_names.add(cname_str.lower())
+            for word in re.findall(r"\b[A-Za-z]{3,}\b", cname_str):
+                ledger.customer_names.add(word.lower())
+        rel = customer.get("relationship", {})
+        if isinstance(rel, dict):
+            for rk, rv in rel.items():
+                if isinstance(rv, (int, float)):
+                    ledger.allowed_numbers.update(_normalize_num(rv))
+                elif isinstance(rv, str):
+                    for num in re.findall(r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?", rv):
+                        ledger.allowed_numbers.update(_normalize_num(num))
+                elif isinstance(rv, list):
+                    for item in rv:
+                        if isinstance(item, str):
+                            ledger.anchors.add(item.lower())
 
-    # General anchors from allowed_facts
+    # General anchors and numbers from allowed_facts
     for fact in compact_context.get("allowed_facts", []):
-        for num in re.findall(r"\b\d+(?:\.\d+)?\b", fact):
+        for num in re.findall(r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?", fact):
             ledger.allowed_numbers.update(_normalize_num(num))
 
     return ledger
@@ -159,10 +284,14 @@ def build_evidence_ledger(compact_context: Dict[str, Any]) -> EvidenceLedger:
 def extract_numbers_from_text(text: str) -> List[str]:
     """
     Extracts all numeric tokens from text, stripping currency and percent symbols.
-    Examples: '₹299' -> '299', '2.1%' -> '2.1', '15' -> '15'.
+    Supports comma-formatted numbers like '2,100'.
+    Examples: '₹299' -> '299', '2.1%' -> '2.1', '2,100' -> '2,100'.
     """
-    # Match patterns like ₹499, Rs. 299, 2.1%, 15, etc.
-    raw_tokens = re.findall(r"(?:₹|\$|Rs\.?\s*)?(\d+(?:\.\d+)?)(?:%)?", text, re.IGNORECASE)
+    raw_tokens = re.findall(
+        r"(?:₹|\$|Rs\.?\s*)?((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)(?:%)?",
+        text,
+        re.IGNORECASE,
+    )
     cleaned = []
     for tok in raw_tokens:
         tok_clean = tok.strip()
@@ -176,12 +305,11 @@ def count_ctas(text: str) -> int:
     Counts distinct CTAs in message.
     Considers questions ('?') and imperative action invitations.
     """
-    # Primary CTA indicator: question mark
     q_count = text.count("?")
 
-    # Additional imperative / command CTA phrases without '?'
     imperatives = [
-        r"\breply\s+(?:yes|confirm|now)\b",
+        r"\breply\s+(?:yes|confirm|now|start|proceed|go|launch)\b",
+        r"\bsay\s+(?:yes|go)\b",
         r"\bclick\s+here\b",
         r"\bcall\s+us\s+now\b",
     ]
@@ -240,39 +368,33 @@ def validate_message(
     # 3. Numeric & Price grounding check
     extracted_nums = extract_numbers_from_text(body_clean)
     for num in extracted_nums:
-        # Check if number matches ledger
-        # Support both '3' matching '3.0' or '3.0' matching '3'
         num_variants = _normalize_num(num)
         if not (num_variants & ledger.allowed_numbers):
             return False, f"Unverified numeric claim '{num}' found in message."
 
     # 4. Invented Customer / Merchant Names check
-    # Check for customer salutations addressing a third party (e.g. "Hi Rahul,", "Dear Priya,")
     salutation_match = re.search(r"\b(?:hi|hello|dear|hey)\s+([A-Z][a-z]+)\b", body_clean)
     if salutation_match:
         addressed_name = salutation_match.group(1).lower()
         if addressed_name not in ledger.customer_names and addressed_name not in ledger.merchant_names:
             return False, f"Invented customer or third-party name '{addressed_name}' not in context."
 
-    # Common fabricated names test
     common_invented = ["priya", "rahul", "aanya", "sneha", "kavya", "rohit", "amit", "vikram", "dr. sharma", "dr. gupta"]
     for name in common_invented:
         if name in body_lower and name not in ledger.customer_names and name not in ledger.merchant_names:
             return False, f"Invented customer or third-party name '{name}' not in context."
 
     # 5. Offer / Product grounding check
-    # Check for specific ungrounded services/procedures
     ungrounded_services = [
         "whitening", "root canal", "hair spa", "massage", "facial", "botox", "implants",
         "haircut", "buffet", "manicure", "pedicure", "laser"
     ]
     for srv in ungrounded_services:
         if srv in body_lower:
-            if not any(srv in off for off in ledger.allowed_offers):
+            if not any(srv in off for off in ledger.allowed_offers) and not any(srv in anchor for anchor in ledger.anchors):
                 return False, f"Message references an offer or service not present in active_offers."
 
-    # If the message mentions an offer, package, service, or promotional phrase
-    offer_indicators = ["offer", "package", "service", "deal", "discount", "treatment", "procedure", "promo", "special"]
+    offer_indicators = ["offer", "package", "deal", "discount", "promo", "special"]
     mentioned_offer = any(w in body_lower for w in offer_indicators)
     if mentioned_offer and ledger.allowed_offers:
         matched_any = False
@@ -293,23 +415,17 @@ def validate_message(
 
     # 7. Generic filler check (must contain at least one grounded fact from ledger)
     has_grounded_fact = False
-    # Check for merchant name
     if any(m in body_lower for m in ledger.merchant_names if len(m) > 2):
         has_grounded_fact = True
-    # Check for category name
     elif any(c in body_lower for c in ledger.category_names if len(c) > 2):
         has_grounded_fact = True
-    # Check for customer name
     elif any(cust in body_lower for cust in ledger.customer_names if len(cust) > 2):
         has_grounded_fact = True
-    # Check for offer title
     elif any(off in body_lower for off in ledger.allowed_offers):
         has_grounded_fact = True
-    # Check for anchor terms (e.g. festival name, research topic)
     elif any(a in body_lower for a in ledger.anchors if len(a) > 2):
         has_grounded_fact = True
-    # Check for allowed numeric metrics (excluding common '1')
-    elif any(num in body_clean for num in ledger.allowed_numbers if num != "1"):
+    elif any(num in body_clean for num in ledger.allowed_numbers if num not in ("1", "2", "3", "4", "5")):
         has_grounded_fact = True
 
     if not has_grounded_fact:

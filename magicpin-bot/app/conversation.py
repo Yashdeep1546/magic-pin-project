@@ -126,6 +126,9 @@ POSITIVE_PATTERNS = [
     r"\bok\b",
     r"\bdo it\b",
     r"let'?s do it",
+    r"lets do it",
+    r"ok lets do it",
+    r"ok let's do it",
     r"send it",
     r"go ahead",
     r"\byep\b",
@@ -137,6 +140,9 @@ POSITIVE_PATTERNS = [
     r"sounds good",
     r"what'?s next",
     r"whats next",
+    r"i want to join",
+    r"ready to (?:start|proceed|launch|go)",
+    r"count me in",
     # Hindi / Hinglish / Emoji positive patterns
     r"\bhaan\b",
     r"\bhaanji\b",
@@ -243,6 +249,13 @@ def is_auto_reply_text(message: str) -> bool:
 class ConversationStateMachine:
     """Manages conversation state transitions and produces reply actions."""
 
+    def __init__(self) -> None:
+        self._auto_reply_tracker: Dict[str, int] = {}
+
+    def reset(self) -> None:
+        """Reset auto-reply tracker."""
+        self._auto_reply_tracker.clear()
+
     def process_reply(
         self,
         request: ReplyRequest,
@@ -283,19 +296,32 @@ class ConversationStateMachine:
                     if t.get("message", "").strip().lower() == msg.lower():
                         repeat_count += 1
 
+        # Track consecutive auto-replies across turns for this merchant or conversation family
+        family_id = re.sub(r'_\d+$', '', conv_id)
+        tracking_key = f"{request.merchant_id or 'none'}:{family_id}"
+        if is_auto:
+            self._auto_reply_tracker[tracking_key] = self._auto_reply_tracker.get(tracking_key, 0) + 1
+            auto_count = self._auto_reply_tracker[tracking_key]
+        else:
+            self._auto_reply_tracker.pop(tracking_key, None)
+            auto_count = 0
+
+        # After 2-3 consecutive detected auto-replies, end conversation gracefully
+        # (Turn 1: wait, Turn 2: wait, Turn 3+: end)
+        effective_repeats = max(repeat_count, (auto_count - 1) if auto_count > 0 else 0)
+
         if is_auto or repeat_count >= 1:
-            # Repeated text detected 2+ times total (current + past >= 1)
-            # If repeated multiple times, end conversation; otherwise wait
-            new_state = ConversationState.END if repeat_count >= 2 else ConversationState.WAIT
+            should_end = effective_repeats >= 2 or auto_count >= 3
+            new_state = ConversationState.END if should_end else ConversationState.WAIT
             wait_s = 1800 if new_state == ConversationState.WAIT else None
 
             if conversation_store:
                 self._record_turn(conversation_store, conv_id, request, new_state, new_state.value.lower())
 
             return ReplyResponse(
-                action="end" if new_state == ConversationState.END else "wait",
+                action="end" if should_end else "wait",
                 wait_seconds=wait_s,
-                rationale="Repeated reply or auto-responder detected; backing off.",
+                rationale="Consecutive auto-reply loop detected; exiting gracefully." if should_end else "Repeated reply or auto-responder detected; backing off.",
             )
 
         # 4. Out-of-order Turn Detection
@@ -346,8 +372,8 @@ class ConversationStateMachine:
             state = ConversationState.SEND
             action = "send"
             body = (
-                "Done! Proceeding with this campaign now. I have prepared the draft and it is ready "
-                "to proceed. Here is the confirmation for your next steps."
+                "Done! Draft ready. Here's what's next: we've prepared your campaign deliverable and it's "
+                "ready to proceed. Sending confirmation and launching now."
             )
             wait_s = None
             rationale = "Merchant committed positively; executing action mode without further qualification."

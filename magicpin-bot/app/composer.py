@@ -32,18 +32,69 @@ CATEGORY_POLICIES: Dict[str, str] = {
     "pharmacies": "utility-first/very conservative",
 }
 
-SYSTEM_PROMPT = """You are Vera, a merchant growth assistant. Write ONE concise WhatsApp-style message.
-Rules:
-1. Use ONLY facts present in the supplied context.
-2. Never invent prices, metrics, dates, offers, customers, or claims.
-3. Mention the strongest selected signal.
-4. Make the message specific to this merchant.
-5. Match the category voice.
-6. Give exactly ONE CTA ending with a question mark (e.g. 'Should we send this now?').
-7. Keep the ask easy to answer.
-8. Do not mention internal reasoning.
-9. Do not repeat previous messages.
-Return JSON: {"body": "...", "cta": "...", "rationale": "..."}"""
+
+def resolve_voice_policy(category: Optional[Dict[str, Any]], cat_slug: str) -> Dict[str, Any]:
+    """
+    Dynamically resolve category voice policy from category.voice payload,
+    falling back to CATEGORY_POLICIES baseline if voice configuration is absent.
+    """
+    c = category or {}
+    voice = c.get("voice") or {}
+    tone = voice.get("tone")
+    register = voice.get("register")
+    code_mix = voice.get("code_mix")
+    vocab_allowed = voice.get("vocab_allowed") or []
+    taboos = voice.get("vocab_taboo") or voice.get("taboos") or []
+
+    if not tone:
+        # Fallback to predefined baseline
+        tone = CATEGORY_POLICIES.get(cat_slug.lower(), "professional/practical/growth-oriented")
+
+    has_rich_voice = bool(register or code_mix or vocab_allowed or taboos)
+    if has_rich_voice:
+        policy_parts = [f"Tone: {tone}"]
+        if register:
+            policy_parts.append(f"Register: {register}")
+        if code_mix:
+            policy_parts.append(f"Language mix: {code_mix}")
+        if vocab_allowed:
+            policy_parts.append(f"Allowed terms: {', '.join(vocab_allowed[:8])}")
+        if taboos:
+            policy_parts.append(f"Taboos: {', '.join(taboos[:8])}")
+        summary_str = "; ".join(policy_parts)
+    else:
+        summary_str = tone
+
+    return {
+        "tone": tone,
+        "register": register,
+        "code_mix": code_mix,
+        "vocab_allowed": vocab_allowed,
+        "taboos": taboos,
+        "summary": summary_str,
+    }
+
+SYSTEM_PROMPT = """You are Vera, a high-converting merchant growth assistant on magicpin. Write ONE concise WhatsApp-style message.
+
+RULES:
+1. GROUNDING & HONESTY: Use ONLY facts, metrics, citations, and active offers explicitly provided in the context. Never fabricate data, prices, dates, customer names, or claims.
+2. PERSONALIZATION: Address the merchant/owner directly by name (use 'Dr. [FirstName]' for dentists if available). Reference their specific locality and business category.
+3. CATEGORY VOICE: Strictly adopt the authentic category tone:
+   - Dentists: peer-clinical, respectful, collegial, evidence-based (cite research/trial_n if in digest).
+   - Salons: warm, visual, occasion-driven, practical.
+   - Restaurants: busy operator-to-operator, timely, concise.
+   - Gyms: energetic, motivational, progress-driven coaching.
+   - Pharmacies: precise, trustworthy, utility-first, conservative.
+   Adhere to allowed terms and avoid taboos.
+4. TRIGGER ANCHOR: Ground the message clearly in the primary trigger signal and explain why this matters right now.
+5. ENGAGEMENT COMPULSION & HIGH-CONVERTING CTA (CRITICAL):
+   - NEVER use passive permission-seeking phrasing (e.g. NEVER ask "Would you like me to...?", "Can I help you with...?", "Want me to...?", or "Should we...?").
+   - Propose a CONCRETE next step with light urgency, FOMO, or loss-aversion framing (per challenge-brief §10 compulsion levers: specificity, loss aversion, social proof, effort externalization, single binary commitment).
+   - Use low-friction binary commitment framing: e.g. "Reply YES to get the 3-step checklist before the deadline", "Reply YES to lock in this draft before Friday's rush", or "Reply YES to launch this promo to 500 nearby customers today".
+   - Keep EXACTLY ONE CTA at the end of the message. Do NOT include a second ask, multiple choice question, or secondary ask.
+6. NO INTERNAL REASONING: Do not mention internal rules, scoring, trigger IDs, or system concepts.
+7. Return JSON only:
+{"body": "<rendered WhatsApp message text>", "cta": "<the single CTA text>", "rationale": "<1-sentence explanation of why this was sent>"}"""
 
 # LLM Timeout in seconds (enforcing 8-10 seconds per requirements)
 LLM_TIMEOUT_SECONDS = float(os.environ.get("LLM_TIMEOUT_SECONDS", str(getattr(settings, "LLM_TIMEOUT_SECONDS", 8.0))))
@@ -88,46 +139,121 @@ def build_compact_context(
     selected_signal: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Builds a small JSON object containing ONLY the facts the LLM is allowed to use,
-    plus explicit 'allowed_facts' and 'forbidden_claims' lists.
+    Builds a small, grounded JSON object containing ONLY the facts the LLM is allowed to use.
+    Walks real nested payloads (testing-brief.md §3) with fallback for flat structures:
+    - digest[].source, digest[].trial_n, digest[].title, digest[].summary
+    - performance.delta_7d (views_pct, calls_pct, ctr_pct)
+    - customer_aggregate (total_unique_ytd, lapsed_180d_plus, retention_6mo_pct, high_risk_adult_count)
+    - signals[] for framing strengths/weaknesses
+    - category.voice (tone, register, vocab_allowed, taboos)
+    - offers[].title where status == 'active'
     """
-    m = merchant or {}
-    c = category or {}
-    t = trigger or {}
-    cust = customer or {}
+    m_raw = merchant or {}
+    c_raw = category or {}
+    t_raw = trigger or {}
+    cust_raw = customer or {}
 
-    m_identity = m.get("identity", {})
+    # Automatically unwrap ContextStore envelope if passed directly
+    m = m_raw.get("payload") if (isinstance(m_raw, dict) and "payload" in m_raw and isinstance(m_raw["payload"], dict)) else m_raw
+    c = c_raw.get("payload") if (isinstance(c_raw, dict) and "payload" in c_raw and isinstance(c_raw["payload"], dict)) else c_raw
+    t = t_raw.get("payload") if (isinstance(t_raw, dict) and "payload" in t_raw and isinstance(t_raw["payload"], dict) and "kind" not in t_raw) else t_raw
+    cust = cust_raw.get("payload") if (isinstance(cust_raw, dict) and "payload" in cust_raw and isinstance(cust_raw["payload"], dict)) else cust_raw
+
+    # 1. Merchant Identity
+    m_identity = m.get("identity") if isinstance(m.get("identity"), dict) else {}
     m_name = sanitize_text(m_identity.get("name") or m.get("name", "Merchant Partner"))
-    m_owner = sanitize_text(m_identity.get("owner_first_name"))
-    m_city = sanitize_text(m_identity.get("city"))
-    m_locality = sanitize_text(m_identity.get("locality"))
+    m_owner = sanitize_text(m_identity.get("owner_first_name") or m.get("owner"))
+    m_city = sanitize_text(m_identity.get("city") or m.get("city"))
+    m_locality = sanitize_text(m_identity.get("locality") or m.get("locality"))
 
-    perf = m.get("performance", {})
-    m_ctr = perf.get("ctr")
-    m_views = perf.get("views")
-    m_calls = perf.get("calls")
+    # 2. Performance Metrics
+    perf = m.get("performance") if isinstance(m.get("performance"), dict) else {}
+    m_ctr = perf.get("ctr") if perf.get("ctr") is not None else m.get("ctr")
+    m_views = perf.get("views") if perf.get("views") is not None else m.get("views")
+    m_calls = perf.get("calls") if perf.get("calls") is not None else m.get("calls")
+    m_directions = perf.get("directions") if perf.get("directions") is not None else m.get("directions")
+    m_leads = perf.get("leads") if perf.get("leads") is not None else m.get("leads")
 
-    active_offers = [
-        o.get("title") for o in m.get("offers", []) if o.get("status") == "active"
-    ]
+    delta_7d = perf.get("delta_7d") if isinstance(perf.get("delta_7d"), dict) else {}
 
+    # 3. Customer Aggregate & Signals
+    cust_agg = m.get("customer_aggregate") if isinstance(m.get("customer_aggregate"), dict) else {}
+    signals = m.get("signals") if isinstance(m.get("signals"), list) else []
+
+    # 4. Active Offers
+    active_offers: List[str] = []
+    raw_offers = m.get("offers", [])
+    if isinstance(raw_offers, list):
+        for o in raw_offers:
+            if isinstance(o, dict):
+                if o.get("status") == "active" and o.get("title"):
+                    active_offers.append(o["title"].strip())
+            elif isinstance(o, str) and o.strip():
+                active_offers.append(o.strip())
+    # Backwards compatibility with active_offers key if passed directly
+    if isinstance(m.get("active_offers"), list):
+        for ao in m["active_offers"]:
+            if isinstance(ao, str) and ao.strip() and ao.strip() not in active_offers:
+                active_offers.append(ao.strip())
+
+    # 5. Category Context & Dynamic Voice
     cat_slug = c.get("slug") or m.get("category_slug", "general")
     cat_name = c.get("display_name", cat_slug)
-    peer_stats = c.get("peer_stats", {})
-    peer_ctr = peer_stats.get("avg_ctr")
+    peer_stats = c.get("peer_stats") if isinstance(c.get("peer_stats"), dict) else {}
+    peer_ctr = peer_stats.get("avg_ctr") if peer_stats.get("avg_ctr") is not None else c.get("peer_avg_ctr")
 
-    voice_policy = CATEGORY_POLICIES.get(
-        cat_slug.lower(),
-        "professional/practical/growth-oriented",
-    )
+    voice_info = resolve_voice_policy(c, cat_slug)
+    voice_policy_str = voice_info["summary"]
 
+    # 6. Trigger Context & Digest Matching
     t_kind = t.get("kind", t.get("type", "notification"))
     t_urgency = t.get("urgency", 1)
-    t_payload = t.get("payload", {})
+    t_payload = t.get("payload") if isinstance(t.get("payload"), dict) else {}
 
-    cust_name = cust.get("identity", {}).get("name") if cust else None
+    # Match relevant digest item for research / compliance / educational triggers
+    matched_digest: Optional[Dict[str, Any]] = None
+    digests = c.get("digest") if isinstance(c.get("digest"), list) else []
+    top_item_id = t_payload.get("top_item_id") or t_payload.get("top_item") or t_payload.get("digest_id")
 
-    # Construct allowed facts list
+    if top_item_id:
+        for item in digests:
+            if isinstance(item, dict) and item.get("id") == top_item_id:
+                matched_digest = item
+                break
+
+    if not matched_digest and t_kind in (
+        "research_digest",
+        "category_research_digest_release",
+        "compliance_alert",
+        "regulation_change",
+    ):
+        for item in digests:
+            if isinstance(item, dict):
+                matched_digest = item
+                break
+
+    digest_dict: Optional[Dict[str, Any]] = None
+    if matched_digest:
+        digest_dict = {
+            "id": matched_digest.get("id"),
+            "kind": matched_digest.get("kind"),
+            "title": matched_digest.get("title"),
+            "source": matched_digest.get("source"),
+            "trial_n": matched_digest.get("trial_n"),
+            "patient_segment": matched_digest.get("patient_segment"),
+            "summary": matched_digest.get("summary"),
+            "actionable": matched_digest.get("actionable"),
+        }
+
+    # 7. Customer Context (if scope=customer)
+    cust_identity = cust.get("identity") if isinstance(cust.get("identity"), dict) else {}
+    cust_name = sanitize_text(cust_identity.get("name") or cust.get("name")) if cust else None
+    cust_lang = cust_identity.get("language_pref") if cust else None
+    cust_rel = cust.get("relationship") if isinstance(cust.get("relationship"), dict) else {}
+    cust_state = cust.get("state") if cust else None
+    cust_pref = cust.get("preferences") if isinstance(cust.get("preferences"), dict) else {}
+
+    # 8. Construct Allowed Facts List
     allowed_facts = [
         f"Merchant name: {m_name}",
         f"Category: {cat_name}",
@@ -140,24 +266,93 @@ def build_compact_context(
         allowed_facts.append(f"Locality: {m_locality}")
     if m_ctr is not None:
         allowed_facts.append(f"Merchant 30d CTR: {m_ctr * 100:.1f}%")
+    if m_views is not None:
+        allowed_facts.append(f"Merchant 30d views: {m_views}")
+    if m_calls is not None:
+        allowed_facts.append(f"Merchant 30d calls: {m_calls}")
     if peer_ctr is not None:
         allowed_facts.append(f"Category peer avg CTR: {peer_ctr * 100:.1f}%")
+
+    # 7-day performance deltas
+    views_pct = delta_7d.get("views_pct")
+    calls_pct = delta_7d.get("calls_pct")
+    ctr_pct = delta_7d.get("ctr_pct")
+    if views_pct is not None:
+        allowed_facts.append(f"7d views trend: {views_pct * 100:+.1f}%")
+    if calls_pct is not None:
+        allowed_facts.append(f"7d calls trend: {calls_pct * 100:+.1f}%")
+    if ctr_pct is not None:
+        allowed_facts.append(f"7d CTR trend: {ctr_pct * 100:+.1f}%")
+
+    # Customer aggregates
+    high_risk_adults = cust_agg.get("high_risk_adult_count")
+    total_ytd = cust_agg.get("total_unique_ytd")
+    lapsed_180d = cust_agg.get("lapsed_180d_plus")
+    retention_6mo = cust_agg.get("retention_6mo_pct")
+    if high_risk_adults is not None:
+        allowed_facts.append(f"High-risk adult patient cohort: {high_risk_adults} patients")
+    if total_ytd is not None:
+        allowed_facts.append(f"Total unique customers YTD: {total_ytd}")
+    if lapsed_180d is not None:
+        allowed_facts.append(f"Lapsed customers (180d+): {lapsed_180d}")
+    if retention_6mo is not None:
+        allowed_facts.append(f"6-month customer retention: {retention_6mo * 100:.1f}%")
+
+    # Signals
+    if signals:
+        allowed_facts.append(f"Active merchant signals: {', '.join(signals)}")
+
+    # Active offers
     if active_offers:
         allowed_facts.append(f"Active offers: {', '.join(active_offers)}")
+
+    # Digest citation details
+    if digest_dict:
+        if digest_dict.get("title"):
+            allowed_facts.append(f"Digest topic: {digest_dict['title']}")
+        if digest_dict.get("source"):
+            allowed_facts.append(f"Digest source citation: {digest_dict['source']}")
+        if digest_dict.get("trial_n"):
+            tn = digest_dict["trial_n"]
+            allowed_facts.append(f"Clinical trial sample: {tn:,} patients ({tn})")
+        if digest_dict.get("patient_segment"):
+            allowed_facts.append(f"Relevant patient segment: {digest_dict['patient_segment']}")
+        if digest_dict.get("summary"):
+            allowed_facts.append(f"Research summary: {digest_dict['summary']}")
+        if digest_dict.get("actionable"):
+            allowed_facts.append(f"Actionable takeaway: {digest_dict['actionable']}")
+
+    # Customer-facing details
+    if cust_name:
+        allowed_facts.append(f"Customer name: {cust_name}")
+    if cust_lang:
+        allowed_facts.append(f"Customer language preference: {cust_lang}")
+    if cust_state:
+        allowed_facts.append(f"Customer status: {cust_state}")
+    if cust_rel.get("last_visit"):
+        allowed_facts.append(f"Customer last visit: {cust_rel['last_visit']}")
+    if cust_rel.get("visits_total"):
+        allowed_facts.append(f"Customer total visits: {cust_rel['visits_total']}")
+    if cust_rel.get("services_received"):
+        allowed_facts.append(f"Services received: {', '.join(cust_rel['services_received'])}")
+    if cust_pref.get("preferred_slots"):
+        allowed_facts.append(f"Preferred slots: {cust_pref['preferred_slots']}")
+
+    # Trigger payload specific facts
     if t_kind:
         allowed_facts.append(f"Primary trigger kind: {t_kind}")
     if selected_signal:
         allowed_facts.append(f"Selected signal: {selected_signal}")
-    if cust_name:
-        allowed_facts.append(f"Customer name: {cust_name}")
-
-    # Specific payload details if available
     if "service_due" in t_payload:
         allowed_facts.append(f"Service due: {t_payload['service_due']}")
     if "festival" in t_payload:
         allowed_facts.append(f"Upcoming festival: {t_payload['festival']} (in {t_payload.get('days_until', 'few')} days)")
-    if "top_item_id" in t_payload:
+    if "top_item_id" in t_payload and not digest_dict:
         allowed_facts.append(f"Research topic anchor: {t_payload['top_item_id']}")
+    if "delta_pct" in t_payload:
+        dp = t_payload["delta_pct"]
+        dp_pct = dp * 100 if abs(dp) < 1 else dp
+        allowed_facts.append(f"Performance delta: {dp_pct:+.1f}%")
 
     forbidden_claims = [
         "Do not invent discounts, prices, or free services not in active_offers.",
@@ -173,23 +368,42 @@ def build_compact_context(
             "owner": m_owner,
             "city": m_city,
             "locality": m_locality,
-            "performance": {"ctr": m_ctr, "views": m_views, "calls": m_calls},
+            "performance": {
+                "ctr": m_ctr,
+                "views": m_views,
+                "calls": m_calls,
+                "directions": m_directions,
+                "leads": m_leads,
+                "delta_7d": delta_7d,
+            },
+            "customer_aggregate": cust_agg,
+            "signals": signals,
             "active_offers": active_offers,
         },
         "category": {
             "slug": cat_slug,
             "name": cat_name,
+            "peer_stats": peer_stats,
             "peer_avg_ctr": peer_ctr,
-            "voice_policy": voice_policy,
+            "voice": voice_info,
+            "voice_policy": voice_policy_str,
         },
+        "digest": digest_dict,
         "trigger": {
+            "id": t.get("id"),
             "kind": t_kind,
             "urgency": t_urgency,
             "details": t_payload,
         },
-        "customer": {"name": cust_name} if cust_name else None,
+        "customer": {
+            "name": cust_name,
+            "language_pref": cust_lang,
+            "state": cust_state,
+            "relationship": cust_rel,
+            "preferences": cust_pref,
+        } if cust_name else None,
         "selected_signal": selected_signal or t_kind,
-        "category_voice_policy": voice_policy,
+        "category_voice_policy": voice_policy_str,
         "allowed_facts": allowed_facts,
         "forbidden_claims": forbidden_claims,
     }
@@ -308,8 +522,11 @@ def compose_message(
 
         body = body.strip()
         cta_val = data.get("cta")
-        if cta_val and isinstance(cta_val, str) and cta_val.strip() and "?" not in body:
-            body = f"{body} {cta_val.strip()}"
+        from app.output_validator import count_ctas
+        if cta_val and isinstance(cta_val, str) and cta_val.strip():
+            cta_clean = cta_val.strip()
+            if count_ctas(body) == 0 and cta_clean.lower() not in body.lower():
+                body = f"{body} {cta_clean}"
 
         # Grounding validation against evidence ledger
         ledger = build_evidence_ledger(compact_context)

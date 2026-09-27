@@ -31,3 +31,8 @@ scratch/
 *.swo
 .DS_Store
 Thumbs.db
+
+# Logs & Graphify cache
+*.log
+graphify-out/cache/
+graphify-out/2026-*

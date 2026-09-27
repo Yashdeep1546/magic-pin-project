@@ -9,12 +9,16 @@ VALID_SCOPES: Set[str] = {"category", "merchant", "customer", "trigger"}
 def validate_context_request(data: Any) -> Dict[str, Any]:
     """
     Validates the request payload for POST /v1/context.
-    Raises HTTPException(status_code=400) with a clear error message on any validation error.
+    Raises HTTPException(status_code=400) with {"accepted": false, "reason": ..., "details": ...} on any validation error.
     """
     if data is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Request body cannot be empty.",
+            detail={
+                "accepted": False,
+                "reason": "empty_payload",
+                "details": "Request body cannot be empty.",
+            },
         )
 
     # Extract dictionary representation
@@ -25,7 +29,11 @@ def validate_context_request(data: Any) -> Dict[str, Any]:
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Request body must be a JSON object.",
+            detail={
+                "accepted": False,
+                "reason": "malformed_request",
+                "details": "Request body must be a JSON object.",
+            },
         )
 
     # 1. Validate scope
@@ -33,13 +41,21 @@ def validate_context_request(data: Any) -> Dict[str, Any]:
     if scope is None or not isinstance(scope, str) or not scope.strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Missing or empty scope. Must be one of: {', '.join(sorted(VALID_SCOPES))}",
+            detail={
+                "accepted": False,
+                "reason": "missing_scope",
+                "details": f"Missing or empty scope. Must be one of: {', '.join(sorted(VALID_SCOPES))}",
+            },
         )
     scope = scope.strip().lower()
     if scope not in VALID_SCOPES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid scope '{raw_dict.get('scope')}'. Must be one of: {', '.join(sorted(VALID_SCOPES))}",
+            detail={
+                "accepted": False,
+                "reason": "invalid_scope",
+                "details": f"Invalid scope '{raw_dict.get('scope')}'. Must be one of: {', '.join(sorted(VALID_SCOPES))}",
+            },
         )
 
     # 2. Validate context_id
@@ -47,7 +63,11 @@ def validate_context_request(data: Any) -> Dict[str, Any]:
     if context_id is None or not isinstance(context_id, str) or not context_id.strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Missing or invalid context_id. Must be a non-empty string.",
+            detail={
+                "accepted": False,
+                "reason": "missing_context_id",
+                "details": "Missing or invalid context_id. Must be a non-empty string.",
+            },
         )
     context_id = context_id.strip()
 
@@ -56,17 +76,29 @@ def validate_context_request(data: Any) -> Dict[str, Any]:
     if version is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Missing version. Version must be an integer >= 1.",
+            detail={
+                "accepted": False,
+                "reason": "missing_version",
+                "details": "Missing version. Version must be an integer >= 1.",
+            },
         )
     if isinstance(version, bool) or not isinstance(version, int):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid version. Version must be an integer >= 1.",
+            detail={
+                "accepted": False,
+                "reason": "invalid_version",
+                "details": "Invalid version. Version must be an integer >= 1.",
+            },
         )
     if version < 1:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid version ({version}). Version must be >= 1.",
+            detail={
+                "accepted": False,
+                "reason": "invalid_version",
+                "details": f"Invalid version ({version}). Version must be >= 1.",
+            },
         )
 
     # 4. Validate payload (must be non-empty dict)
@@ -74,12 +106,20 @@ def validate_context_request(data: Any) -> Dict[str, Any]:
     if payload is None or not isinstance(payload, dict):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Missing or invalid payload. Must be a non-empty JSON object.",
+            detail={
+                "accepted": False,
+                "reason": "missing_payload",
+                "details": "Missing or invalid payload. Must be a non-empty JSON object.",
+            },
         )
     if len(payload) == 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid payload: payload object cannot be empty.",
+            detail={
+                "accepted": False,
+                "reason": "empty_payload",
+                "details": "Invalid payload: payload object cannot be empty.",
+            },
         )
 
     delivered_at = raw_dict.get("delivered_at")

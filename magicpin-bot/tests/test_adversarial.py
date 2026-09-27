@@ -365,8 +365,9 @@ def test_resolvers_fallback_behavior():
     # Invalid trigger filtering in select_strongest_signal
     assert select_strongest_signal(["not_a_dict"]) is None
 
-    # Expiry with now_iso=None
-    assert is_trigger_expired({"expires_at": "2020-01-01T00:00:00Z"}, None) is True
+    # Expiry with now_iso=None (per testing-brief.md §2.2, never expires by real server time)
+    assert is_trigger_expired({"expires_at": "2020-01-01T00:00:00Z"}, None) is False
+
 
     # select_strongest_signal with context_store
     context_store.set("merchant", "m_exist", 1, {"name": "Existent", "category_slug": "salons"})
@@ -396,9 +397,9 @@ def test_resolvers_fallback_behavior():
     assert res2 is not None
     assert res2["id"] == "t_val"
 
-    # score_trigger with category & customer bonuses
+    # score_trigger with category & customer bonuses (urgency=3 -> 60 + 35 = 95)
     merchant = {"category_slug": "salons", "performance": {"ctr": 0.01}}
     category = {"slug": "salons", "trending": True}
     customer = {"lapsed_days": 90, "high_value": True}
     score = score_trigger(trg_valid, merchant, category, customer)
-    assert score > 100
+    assert score >= 90

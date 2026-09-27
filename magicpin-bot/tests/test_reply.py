@@ -7,6 +7,7 @@ from app.conversation import (
     ConversationState,
     Intent,
     classify_intent,
+    conversation_state_machine,
     is_auto_reply_text,
 )
 from app.main import app
@@ -20,9 +21,11 @@ def clean_stores():
     """Ensure context and conversation stores are reset before each test."""
     context_store.clear()
     conversation_store.clear()
+    conversation_state_machine.reset()
     yield
     context_store.clear()
     conversation_store.clear()
+    conversation_state_machine.reset()
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +88,37 @@ def test_reply_positive_intent():
     assert conv["state"] == ConversationState.SEND.value
     assert len(conv["turns"]) == 1
     assert len(conv["sent_messages"]) == 1
+
+
+def test_reply_exact_commitment_transition_regression():
+    """
+    Regression test for: 'Ok lets do it. Whats next?'
+    Must immediately return action: 'send' with concrete deliverables (e.g. 'draft ready',
+    'here's what's next') and zero qualifying questions.
+    """
+    response = client.post("/v1/reply", json={
+        "conversation_id": "conv_intent_regression_1",
+        "merchant_id": "m_test_mid",
+        "message": "Ok lets do it. Whats next?",
+        "turn_number": 2,
+    })
+    assert response.status_code == 200
+    data = response.json()
+    assert data["action"] == "send"
+    assert data["wait_seconds"] is None
+    body = data["body"]
+    assert body is not None
+
+    body_lower = body.lower()
+    # Check actioning deliverables
+    actioning = ["done", "sending", "draft", "here", "confirm", "proceed", "next"]
+    assert any(w in body_lower for w in actioning)
+    assert "draft ready" in body_lower or "ready" in body_lower
+    assert "here's what's next" in body_lower or "next" in body_lower
+
+    # Zero qualifying questions allowed
+    qualifying = ["would you", "do you", "can you tell", "what if", "how about"]
+    assert not any(w in body_lower for w in qualifying)
 
 
 def test_reply_negative_intent():
@@ -250,6 +284,35 @@ def test_repeated_auto_reply_detection():
     })
     assert r3.status_code == 200
     assert r3.json()["action"] == "end"
+
+
+def test_auto_reply_loop_termination_4_repeats():
+    """
+    Per challenge-testing-brief.md Phase 4 scenario 1:
+    Judge sends the same canned text 4 times (e.g. conv_auto_1..4).
+    Bot must detect the loop and after 2-3 consecutive auto-replies, return action: 'end'.
+    Final action is asserted to be 'end'.
+    """
+    mid = "m_auto_mid_01"
+    auto_msg = "Thank you for contacting us! Our team will respond shortly."
+
+    actions = []
+    for i in range(1, 5):
+        resp = client.post("/v1/reply", json={
+            "conversation_id": f"conv_auto_{i}",
+            "merchant_id": mid,
+            "message": auto_msg,
+            "turn_number": i + 1,
+        })
+        assert resp.status_code == 200
+        actions.append(resp.json()["action"])
+
+    # Initial turns wait, then terminates gracefully with 'end'
+    assert actions[0] == "wait"
+    assert actions[1] == "wait"
+    assert actions[2] == "end"
+    assert actions[3] == "end"
+    assert actions[-1] == "end"
 
 
 def test_out_of_order_turns():

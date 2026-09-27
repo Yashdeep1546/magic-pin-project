@@ -82,7 +82,8 @@ def test_matrix_1_api_contract_edge_cases():
         headers={"Content-Type": "application/json"},
     )
     assert resp_malformed.status_code == 400
-    assert resp_malformed.json()["error"] == "malformed_json"
+    assert resp_malformed.json()["accepted"] is False
+    assert resp_malformed.json()["reason"] == "malformed_json"
 
     # Wrong types in /v1/context (version as string) -> 400 or 422
     resp_wrong_type = client.post(
@@ -253,10 +254,10 @@ def test_matrix_4_tick_decision_quality_multi_signal_scoring():
 
     # Multi-signal performance drop score should beat the low-urgency unsubscribed compliance alert
     assert score_perf > score_comp
-    # 90 + 5 (urgency) + 15 (merchant) + 15 (category) + 5 (merchant-level) = 130
-    # vs 100 + 1 + 10 = 111
-    assert score_perf == 130
-    assert score_comp == 116
+    # Urgency 5 (100) + 15 (merchant) + 15 (category) + 5 (merchant-level) = 135
+    # vs Urgency 1 (20) + 10 (merchant) + 5 (merchant-level) = 35
+    assert score_perf == 135
+    assert score_comp == 35
 
 
 # ===========================================================================

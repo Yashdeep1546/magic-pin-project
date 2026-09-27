@@ -58,12 +58,15 @@ class ContextResponse(BaseModel):
 
 
 class StaleVersionResponse(BaseModel):
-    error: str = "stale_version"
     accepted: bool = False
     reason: str = "stale_version"
     current_version: int
-    incoming_version: int
-    detail: str
+
+
+class ContextErrorResponse(BaseModel):
+    accepted: bool = False
+    reason: str
+    details: str
 
 
 # ---------------------------------------------------------------------------

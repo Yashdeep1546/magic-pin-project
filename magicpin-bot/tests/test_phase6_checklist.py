@@ -106,7 +106,8 @@ def test_check_3_context_newer_version_replaces_older():
         },
     )
     assert resp_stale.status_code == 409
-    assert resp_stale.json()["error"] == "stale_version"
+    assert resp_stale.json()["reason"] == "stale_version"
+    assert resp_stale.json()["accepted"] is False
 
 
 def test_check_4_context_same_version_idempotent():

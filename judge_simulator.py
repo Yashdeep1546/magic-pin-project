@@ -20,31 +20,56 @@ Author: magicpin AI Challenge Team
 # ██████  CONFIGURATION - EDIT THIS SECTION ██████
 # =============================================================================
 
+import os
+
 # Your bot's URL (where your bot is running)
-BOT_URL = "http://localhost:8080"
+BOT_URL = os.environ.get("BOT_URL", "http://127.0.0.1:8000")
+
 
 # Choose your LLM provider: "openai", "anthropic", "gemini", "deepseek", "groq", "ollama", "openrouter"
-LLM_PROVIDER = "openai"
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "gemini")
 
 # Your API key (paste your key here)
-LLM_API_KEY = ""  # <-- PUT YOUR API KEY HERE
+LLM_API_KEY = os.environ.get("JUDGE_LLM_API_KEY", "")
+if not LLM_API_KEY or "BOT_URL" not in os.environ:
+    # Auto-load from .env if present
+    env_file = os.path.join(os.path.dirname(__file__), ".env")
+    bot_env = os.path.join(os.path.dirname(__file__), "magicpin-bot", ".env")
+    for f in [env_file, bot_env]:
+        if os.path.exists(f):
+            with open(f, "r", encoding="utf-8") as fp:
+                for line in fp:
+                    if line.strip().startswith("JUDGE_LLM_API_KEY=") and not LLM_API_KEY:
+                        LLM_API_KEY = line.strip().split("=", 1)[1].strip().strip('"').strip("'")
+                    elif not LLM_API_KEY and line.strip().startswith("GEMINI_API_KEY="):
+                        LLM_API_KEY = line.strip().split("=", 1)[1].strip().strip('"').strip("'")
+                    elif line.strip().startswith("BOT_URL=") and "BOT_URL" not in os.environ:
+                        BOT_URL = line.strip().split("=", 1)[1].strip().strip('"').strip("'")
 
 # Model to use (leave empty for default, or specify like "gpt-4o", "claude-3-5-sonnet-20241022", etc.)
-LLM_MODEL = ""  # <-- Optional: specify model or leave empty for default
+LLM_MODEL = os.environ.get("LLM_MODEL", "gemini-3.5-flash-lite")
 
 # For Ollama only: local server URL
-OLLAMA_URL = "http://localhost:11434"
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+
+import sys
 
 # Which test to run by default
-TEST_SCENARIO = "all"
+TEST_SCENARIO = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("TEST_SCENARIO", "all")
 
 # =============================================================================
 # ██████  END OF CONFIGURATION - DON'T EDIT BELOW THIS LINE ██████
 # =============================================================================
 
-import os
-import sys
 import json
+
+
+# Ensure UTF-8 stdout/stderr on Windows to handle currency symbols (₹) and Hindi text
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+
 import time
 import re
 import socket
@@ -57,7 +82,13 @@ from abc import ABC, abstractmethod
 
 # Constants
 TIMEOUT_LLM = 45
-DATASET_DIR = Path(__file__).parent / "dataset"
+DATASET_PATH = os.environ.get("DATASET_DIR", "")
+if DATASET_PATH and Path(DATASET_PATH).exists():
+    DATASET_DIR = Path(DATASET_PATH)
+elif (Path(__file__).parent / "magicpin-bot" / "dataset").exists():
+    DATASET_DIR = Path(__file__).parent / "magicpin-bot" / "dataset"
+else:
+    DATASET_DIR = Path(__file__).parent / "dataset"
 
 # =============================================================================
 # TERMINAL OUTPUT
@@ -209,7 +240,7 @@ class AnthropicProvider(LLMProvider):
 class GeminiProvider(LLMProvider):
     def __init__(self, api_key: str, model: str = ""):
         self.api_key = api_key
-        self.model = model or "gemini-1.5-flash"
+        self.model = model or "gemini-3.5-flash-lite"
 
     def name(self) -> str:
         return f"Gemini ({self.model})"
@@ -361,22 +392,41 @@ class DatasetLoader:
             cat_dir = self.dataset_dir / "categories"
             if cat_dir.exists():
                 for f in cat_dir.glob("*.json"):
-                    data = json.load(open(f))
-                    self.categories[data.get("slug", f.stem)] = data
+                    with open(f, encoding="utf-8") as fp:
+                        data = json.load(fp)
+                        self.categories[data.get("slug", f.stem)] = data
 
+            # 1. Load expanded individual json files from subfolders if present
+            for container, subfolder, key in [
+                ("merchants", "merchants", "merchant_id"),
+                ("customers", "customers", "customer_id"),
+                ("triggers", "triggers", "id"),
+            ]:
+                folder = self.dataset_dir / subfolder
+                if folder.exists():
+                    storage = getattr(self, container)
+                    for f in folder.glob("*.json"):
+                        with open(f, encoding="utf-8") as fp:
+                            data = json.load(fp)
+                            if key in data:
+                                storage[data[key]] = data
+
+            # 2. Fallback to seed files if empty
             for name, container, key in [
                 ("merchants_seed.json", "merchants", "merchant_id"),
                 ("customers_seed.json", "customers", "customer_id"),
                 ("triggers_seed.json", "triggers", "id")
             ]:
-                path = self.dataset_dir / name
-                if path.exists():
-                    data = json.load(open(path))
-                    items = data.get(container, data.get(container.rstrip("s"), []))
-                    storage = getattr(self, container)
-                    for item in items:
-                        if key in item:
-                            storage[item[key]] = item
+                if not getattr(self, container):
+                    path = self.dataset_dir / name
+                    if path.exists():
+                        with open(path, encoding="utf-8") as fp:
+                            data = json.load(fp)
+                            items = data.get(container, data.get(container.rstrip("s"), []))
+                            storage = getattr(self, container)
+                            for item in items:
+                                if key in item:
+                                    storage[item[key]] = item
             return True
         except Exception as e:
             print_fail(f"Dataset load error: {e}")
@@ -422,9 +472,11 @@ class BotClient:
         })
 
     def tick(self, triggers):
+        sim_now = os.environ.get("SIMULATED_NOW", "2026-04-26T10:00:00Z")
         return self._request("POST", "/v1/tick", 15, {
-            "now": datetime.utcnow().isoformat() + "Z", "available_triggers": triggers
+            "now": sim_now, "available_triggers": triggers
         })
+
 
     def reply(self, conv_id, merchant_id, message, turn):
         return self._request("POST", "/v1/reply", 15, {
@@ -731,7 +783,8 @@ class JudgeSimulator:
             return False
 
         action = data.get("action", "?")
-        body = data.get("body", "")
+        body = data.get("body") or ""
+
 
         print_info(f"Bot action: {action}")
         if body:
@@ -769,7 +822,8 @@ class JudgeSimulator:
             return False
 
         action = data.get("action", "?")
-        body = data.get("body", "")
+        body = data.get("body") or ""
+
 
         print_info(f"Bot action: {action}")
 
@@ -806,6 +860,8 @@ class JudgeSimulator:
 
         for mid, m in self.dataset.merchants.items():
             self.client.push_context("merchant", mid, 1, m)
+        for cid, c in self.dataset.customers.items():
+            self.client.push_context("customer", cid, 1, c)
         for tid, t in self.dataset.triggers.items():
             self.client.push_context("trigger", tid, 1, t)
 
@@ -826,7 +882,7 @@ class JudgeSimulator:
             print_info(f"Batch {i//5 + 1}: {len(actions)} actions ({lat:.0f}ms)")
 
             for action in actions:
-                self._score_and_display(action, verbose=False)
+                self._score_and_display(action, verbose=True)
 
         return True
 

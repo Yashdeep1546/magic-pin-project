@@ -14,6 +14,7 @@ from app.config import settings
 from app.conversation import conversation_state_machine
 from app.decision_engine import process_tick, suppression_engine
 from app.models import (
+    ContextErrorResponse,
     ContextRequest,
     ContextResponse,
     ContextsLoaded,
@@ -27,7 +28,7 @@ from app.models import (
     TickRequest,
     TickResponse,
 )
-from app.store import VersionGateResult, context_store, conversation_store
+from app.store import VersionGateResult, context_store, conversation_store, format_gate_response
 from app.validators import validate_context_request
 
 # ---------------------------------------------------------------------------
@@ -100,11 +101,43 @@ async def structured_logging_middleware(request: Request, call_next):
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """
     Handle body and type validation errors strictly.
-    Returns 400 for malformed JSON and 422 for unhandled schema/type mismatches.
+    Returns 400 with testing-brief.md §2.1 shape for /v1/context.
     """
-    req_id = getattr(request.state, "request_id", None)
     errors = exc.errors()
+    if request.url.path == "/v1/context":
+        is_malformed_json = any(
+            err.get("type") in ("json_invalid", "json_type") for err in errors
+        )
+        if is_malformed_json:
+            reason = "malformed_json"
+            details = "Malformed JSON syntax in request body."
+        else:
+            first_err = errors[0] if errors else {}
+            loc = first_err.get("loc", [])
+            field_name = str(loc[-1]) if loc else "request"
+            err_msg = first_err.get("msg", "Validation error")
+            if "scope" in field_name:
+                reason = "invalid_scope"
+            elif "context_id" in field_name:
+                reason = "missing_context_id"
+            elif "version" in field_name:
+                reason = "invalid_version"
+            elif "payload" in field_name:
+                reason = "empty_payload"
+            else:
+                reason = "invalid_request"
+            details = f"Validation failed for {field_name}: {err_msg}"
 
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "accepted": False,
+                "reason": reason,
+                "details": details,
+            },
+        )
+
+    req_id = getattr(request.state, "request_id", None)
     is_malformed_json = any(
         err.get("type") in ("json_invalid", "json_type") for err in errors
     )
@@ -138,19 +171,26 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     """Handle standard HTTP exceptions with clean JSON responses."""
-    req_id = getattr(request.state, "request_id", None)
     if isinstance(exc.detail, dict):
-        content = {"request_id": req_id, **exc.detail}
-    else:
-        error_name = "bad_request" if exc.status_code == 400 else "http_error"
-        content = {
+        if "accepted" in exc.detail:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content=exc.detail,
+            )
+        req_id = getattr(request.state, "request_id", None)
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"request_id": req_id, **exc.detail},
+        )
+    req_id = getattr(request.state, "request_id", None)
+    error_name = "bad_request" if exc.status_code == 400 else "http_error"
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
             "error": error_name,
             "detail": exc.detail,
             "request_id": req_id,
-        }
-    return JSONResponse(
-        status_code=exc.status_code,
-        content=content,
+        },
     )
 
 
@@ -222,7 +262,7 @@ async def metadata():
     tags=["Context"],
     summary="Receive a context push",
     responses={
-        400: {"model": ErrorResponse, "description": "Validation error (missing/invalid fields)"},
+        400: {"model": ContextErrorResponse, "description": "Validation error (missing/invalid fields)"},
         409: {"model": StaleVersionResponse, "description": "Stale version conflict"},
     },
 )
@@ -230,11 +270,11 @@ async def receive_context(body: ContextRequest):
     """
     Receives scoped context entity (category, merchant, customer, or trigger).
     Validates request payload and applies version-gating:
-    - no existing record          -> store it, return 200
-    - incoming version > current  -> replace, return 200
-    - incoming version == current -> no-op, return 200 (idempotent)
-    - incoming version < current  -> return 409 with {"error": "stale_version"}
-    - invalid/missing scope, context_id, version, payload -> return 400
+    - no existing record          -> store it, return 200 {"accepted": true, "ack_id": "...", "stored_at": "..."}
+    - incoming version > current  -> replace, return 200 {"accepted": true, "ack_id": "...", "stored_at": "..."}
+    - incoming version == current -> no-op, return 200 {"accepted": true, "ack_id": "...", "stored_at": "..."} (idempotent)
+    - incoming version < current  -> return 409 {"accepted": false, "reason": "stale_version", "current_version": N}
+    - invalid/missing scope, context_id, version, payload -> return 400 {"accepted": false, "reason": ..., "details": ...}
     """
     validated = validate_context_request(body)
     scope = validated["scope"]
@@ -249,25 +289,11 @@ async def receive_context(body: ContextRequest):
         payload=payload,
     )
 
-    if gate_result == VersionGateResult.STALE:
-        return JSONResponse(
-            status_code=status.HTTP_409_CONFLICT,
-            content={
-                "error": "stale_version",
-                "accepted": False,
-                "reason": "stale_version",
-                "current_version": current_version,
-                "incoming_version": version,
-                "detail": f"Incoming version {version} is older than current version {current_version}.",
-            },
-        )
-
-    ack_id = f"ack_{uuid.uuid4().hex[:8]}"
-    return ContextResponse(
-        accepted=True,
-        ack_id=ack_id,
-        stored_at=datetime.now(timezone.utc).isoformat(),
+    status_code, response_data = format_gate_response(
+        gate_result=gate_result,
+        current_version=current_version,
     )
+    return JSONResponse(status_code=status_code, content=response_data)
 
 
 @app.post(
@@ -325,6 +351,7 @@ async def teardown():
     context_store.clear()
     conversation_store.clear()
     suppression_engine.clear()
+    conversation_state_machine.reset()
     return TeardownResponse(
         status="ok",
         message="State reset complete",
