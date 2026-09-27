@@ -141,6 +141,7 @@ def process_tick(
             compact_ctx = build_compact_context(
                 resolved_context=rc,
                 selected_signal=trg.get("kind"),
+                now=now,
             )
             body, template_name, template_params, rationale = compose_message(
                 compact_context=compact_ctx,

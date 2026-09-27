@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib import error as urlerror, request as urlrequest
 
@@ -74,7 +75,35 @@ def resolve_voice_policy(category: Optional[Dict[str, Any]], cat_slug: str) -> D
         "summary": summary_str,
     }
 
-SYSTEM_PROMPT = """You are Vera, a high-converting merchant growth assistant on magicpin. Write ONE concise WhatsApp-style message to the merchant owner.
+MASTER_SYSTEM_PROMPT_TEMPLATE = """SYSTEM INSTRUCTIONS FOR MERCHANT OUTREACH
+
+You are an expert local business engagement assistant. Your goal is to write a highly contextual, accurate, and actionable WhatsApp message to a local merchant. You must strictly adhere to the following four rules:
+
+1. Zero Hallucination & Strict Data Grounding
+* NEVER invent, hallucinate, or assume metrics, past visit dates, competitor names, or customer names.
+* If specific data points (like CTR, specific visit counts, or drop percentages) are missing from the payload, you MUST use qualitative, generalized phrasing (e.g., "We've noticed a recent shift in local searches" instead of fabricating "A 24% dip").
+* The current date is {current_date}. NEVER project customer visit dates into the future.
+
+2. Smart Category Adaptation (Vocabulary Guardrails)
+You must translate the generic trigger intent to perfectly match the merchant's specific business category. DO NOT use medical terms for gyms, or auto-shop terms for salons.
+* Gyms: Use terms like "members", "workouts", "sessions", "hitting the floor". If a "chronic_refill" trigger is passed to a gym, seamlessly adapt it to mean "membership renewal" or "re-engagement."
+* Dentists: Use terms like "patients", "check-ups", "scaling", "recall".
+* Pharmacies: Use terms like "customers", "refills", "prescriptions", "inventory".
+* Restaurants: Use terms like "diners", "table turnover", "covers", "footfall".
+* Salons: Use terms like "clients", "appointments", "chairs", "stylists".
+
+3. Strict Language Compliance
+* You MUST write the final message in the exact language format requested: {language_preference}.
+* DO NOT default to pure English if a different preference is specified.
+* If "hi-en mix" (Hinglish) is requested, seamlessly blend conversational Hindi (e.g., "Namaste", "badhiya", "fayda", "zaroori") with English business terminology.
+
+4. Grounded Urgency (The Hook)
+* DO NOT invent dramatic, fake competitive threats or phantom milestones to create urgency.
+* Instead, anchor your urgency in reality by combining the verified {locality} with general seasonal/neighborhood momentum.
+* Example Safe Hook: "Festive foot traffic is picking up around {locality}, and we want to ensure {business_name} captures that local intent."
+* Always close with a low-friction Call to Action: "Reply YES to [specific, low-effort next step].\""""
+
+BASE_SYSTEM_PROMPT = """You are Vera, a high-converting merchant growth assistant on magicpin. Write ONE concise WhatsApp-style message to the merchant owner.
 
 SCORING TARGETS (You are scored strictly 0-10 on 5 dimensions; target 9+/10 on all):
 
@@ -113,6 +142,65 @@ SCORING TARGETS (You are scored strictly 0-10 on 5 dimensions; target 9+/10 on a
 
 7. Return JSON only:
 {"body": "<rendered WhatsApp message text>", "cta": "<the single CTA text>", "rationale": "<1-sentence explanation of why this was sent>"}"""
+
+
+def build_system_prompt(compact_context: Optional[Dict[str, Any]] = None) -> str:
+    """
+    Builds the master system prompt by injecting dynamic Python variables:
+    - current_date: Formatted current date (e.g. 'April 26, 2026')
+    - language_preference: Dynamically pulled from customer or merchant JSON context
+    - locality: Verified merchant locality
+    - business_name: Verified merchant business name
+    """
+    ctx = compact_context or {}
+    m = ctx.get("merchant") or {}
+    cust = ctx.get("customer") or {}
+
+    # Calculate dynamic current_date
+    now_str = ctx.get("now")
+    current_date = None
+    if now_str:
+        try:
+            clean_now = str(now_str).replace("Z", "+00:00")
+            dt = datetime.fromisoformat(clean_now)
+            current_date = dt.strftime("%B %d, %Y")
+        except Exception:
+            current_date = str(now_str)
+    if not current_date:
+        current_date = datetime.now(timezone.utc).strftime("%B %d, %Y")
+
+    # Determine dynamic language_preference
+    cust_lang = cust.get("language_pref") if isinstance(cust, dict) else None
+    m_langs = m.get("languages") or []
+    if cust_lang:
+        language_preference = cust_lang
+    elif m_langs:
+        if isinstance(m_langs, list):
+            if "hi" in m_langs and "en" in m_langs:
+                language_preference = "hi-en mix"
+            elif "hi" in m_langs:
+                language_preference = "hi-en mix"
+            else:
+                language_preference = ", ".join(str(l) for l in m_langs)
+        else:
+            language_preference = str(m_langs)
+    else:
+        language_preference = "English"
+
+    locality = m.get("locality") or m.get("city") or "your locality"
+    business_name = m.get("name") or "your business"
+
+    header = MASTER_SYSTEM_PROMPT_TEMPLATE.format(
+        current_date=current_date,
+        language_preference=language_preference,
+        locality=locality,
+        business_name=business_name,
+    )
+
+    return f"{header}\n\n{BASE_SYSTEM_PROMPT}"
+
+
+SYSTEM_PROMPT = build_system_prompt({})
 
 # LLM Timeout in seconds (enforcing 8-10 seconds per requirements)
 LLM_TIMEOUT_SECONDS = float(os.environ.get("LLM_TIMEOUT_SECONDS", str(getattr(settings, "LLM_TIMEOUT_SECONDS", 8.0))))
@@ -213,6 +301,7 @@ def build_compact_context(
     customer: Optional[Any] = None,
     selected_signal: Optional[str] = None,
     resolved_context: Optional[Any] = None,
+    now: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Builds a small, grounded JSON object containing ONLY the facts the LLM is allowed to use.
@@ -232,6 +321,7 @@ def build_compact_context(
         t_raw = getattr(rc, "trigger", None)
         cust_raw = getattr(rc, "customer", None)
     else:
+        rc = None
         m_raw = merchant or {}
         c_raw = category or {}
         t_raw = trigger or {}
@@ -249,6 +339,7 @@ def build_compact_context(
     m_owner = sanitize_text(m_identity.get("owner_first_name") or m.get("owner"))
     m_city = sanitize_text(m_identity.get("city") or m.get("city"))
     m_locality = sanitize_text(m_identity.get("locality") or m.get("locality"))
+    m_languages = m_identity.get("languages") or m.get("languages") or []
 
     # 2. Performance Metrics
     perf = m.get("performance") if isinstance(m.get("performance"), dict) else {}
@@ -473,12 +564,17 @@ def build_compact_context(
         allowed_facts.append("Note: Trigger has no specific delta or trend metrics. Do NOT invent counts, percentages, or timeline deltas.")
         forbidden_claims.append("Do not invent any growth percentages, traffic surges, customer counts, or metrics for this trigger.")
 
+    now_val = now or (getattr(rc, "metadata", {}) or {}).get("now") if rc else None
+    now_val = now_val or (t.get("created_at") if isinstance(t, dict) else None) or (t.get("timestamp") if isinstance(t, dict) else None)
+
     return {
+        "now": now_val,
         "merchant": {
             "name": m_name,
             "owner": m_owner,
             "city": m_city,
             "locality": m_locality,
+            "languages": m_languages,
             "performance": {
                 "ctr": m_ctr,
                 "views": m_views,
@@ -619,10 +715,11 @@ def compose_message(
     )
 
     try:
+        system_prompt = build_system_prompt(compact_context)
         if _custom_llm_caller is not None:
-            raw_response = _custom_llm_caller(user_prompt, SYSTEM_PROMPT, LLM_TIMEOUT_SECONDS)
+            raw_response = _custom_llm_caller(user_prompt, system_prompt, LLM_TIMEOUT_SECONDS)
         else:
-            raw_response = _default_llm_call(user_prompt, SYSTEM_PROMPT, LLM_TIMEOUT_SECONDS)
+            raw_response = _default_llm_call(user_prompt, system_prompt, LLM_TIMEOUT_SECONDS)
 
         # Parse JSON
         if not raw_response or not isinstance(raw_response, str):

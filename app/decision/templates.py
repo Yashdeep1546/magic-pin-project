@@ -112,9 +112,9 @@ def _render_performance(
         rationale = f"Performance spike in {metric} detected for {m_name}."
     else:
         perf = merchant.get("performance", {}) if merchant else {}
-        ctr_val = round(perf.get("ctr", 0.021) * 100, 1)
+        raw_ctr = perf.get("ctr")
         peer_stats = category.get("peer_stats", {}) if category else {}
-        peer_ctr_val = round(peer_stats.get("avg_ctr", 0.030) * 100, 1)
+        raw_peer_ctr = peer_stats.get("avg_ctr")
 
         metric = payload.get("metric")
         delta = payload.get("delta_pct")
@@ -126,13 +126,22 @@ def _render_performance(
             )
             template_params = [m_name, str(metric), drop_str, cat_name, offer_str]
             rationale = f"Detected performance drop in {metric} ({drop_str}) for {m_name}."
-        else:
+        elif raw_ctr is not None and raw_peer_ctr is not None:
+            ctr_val = round(raw_ctr * 100, 1)
+            peer_ctr_val = round(raw_peer_ctr * 100, 1)
             body = (
                 f"{m_name}, your CTR is {ctr_val}% vs {peer_ctr_val}% for {cat_name} peers. "
                 f"You already have {offer_str} active — reply YES to boost visibility before this dip widens."
             )
             template_params = [m_name, str(ctr_val), str(peer_ctr_val), cat_name, offer_str]
             rationale = f"Detected performance drop in CTR for {m_name} compared to {cat_name} peers."
+        else:
+            body = (
+                f"{m_name}, we've noticed a recent shift in local searches for {cat_name}. "
+                f"You already have {offer_str} active — reply YES to boost visibility before this dip widens."
+            )
+            template_params = [m_name, cat_name, offer_str]
+            rationale = f"Qualitative shift in local search interest for {m_name} in {cat_name}."
 
         template_name = TEMPLATE_NAME_OVERRIDES.get(kind, "template_performance_drop_v1")
 
@@ -176,13 +185,53 @@ def _render_recall_lapse(
             or payload.get("medicine_name")
         )
         service = _clean_entity_text(raw_service, "scheduled service")
-        body = (
-            f"{m_name}, {cust_name} is due for {service}. "
-            f"Reply YES to send the recall invite before their preferred slots fill up."
-        )
+        cat_lower = (cat_name or "").lower()
+
+        if "gym" in cat_lower or "fitness" in cat_lower:
+            service_term = "membership renewal" if service in ("scheduled service", "chronic_refill_due") else service
+            member_term = f"Member {cust_name}" if cust_name != "Your customer" else "A regular member"
+            body = (
+                f"{m_name}, {member_term} is due for {service_term}. "
+                f"Reply YES to send the renewal invite before their workout streak breaks."
+            )
+            template_params = [m_name, str(cust_name), str(service_term)]
+            rationale = f"Membership renewal due for {cust_name} at {m_name}."
+        elif "dent" in cat_lower:
+            service_term = "a recall check-up" if service in ("scheduled service", "chronic_refill_due") else service
+            patient_term = f"Patient {cust_name}" if cust_name != "Your customer" else "A patient"
+            body = (
+                f"{m_name}, {patient_term} is due for {service_term}. "
+                f"Reply YES to send the recall invite before their preferred slots fill up."
+            )
+            template_params = [m_name, str(cust_name), str(service_term)]
+            rationale = f"Dental recall check-up due for {cust_name} at {m_name}."
+        elif "salon" in cat_lower or "spa" in cat_lower:
+            service_term = "an appointment" if service in ("scheduled service", "chronic_refill_due") else service
+            client_term = f"Client {cust_name}" if cust_name != "Your customer" else "A regular client"
+            body = (
+                f"{m_name}, {client_term} is due for {service_term}. "
+                f"Reply YES to send the booking invite before chairs fill up."
+            )
+            template_params = [m_name, str(cust_name), str(service_term)]
+            rationale = f"Salon appointment due for {cust_name} at {m_name}."
+        elif "restaur" in cat_lower or "cafe" in cat_lower:
+            diner_term = f"Diner {cust_name}" if cust_name != "Your customer" else "A regular diner"
+            body = (
+                f"{m_name}, {diner_term} is due for another visit. "
+                f"Reply YES to send a table reservation invite before peak covers begin."
+            )
+            template_params = [m_name, str(cust_name)]
+            rationale = f"Diner re-engagement opportunity for {cust_name} at {m_name}."
+        else:
+            service_term = "a prescription refill" if (kind == "chronic_refill_due" or service in ("scheduled service", "chronic_refill_due")) else service
+            body = (
+                f"{m_name}, {cust_name} is due for {service_term}. "
+                f"Reply YES to send the recall invite before their preferred slots fill up."
+            )
+            template_params = [m_name, str(cust_name), str(service_term)]
+            rationale = f"Service recall due for {cust_name} at {m_name}."
+
         template_name = TEMPLATE_NAME_OVERRIDES.get(kind, "template_recall_lapse_v1")
-        template_params = [m_name, str(cust_name), str(service)]
-        rationale = f"Service recall due for {cust_name} at {m_name}."
     elif kind in ("customer_winback", "winback_eligible", "winback"):
         body = (
             f"{m_name}, several past customers haven't visited in over 60 days. "

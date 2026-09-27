@@ -439,3 +439,107 @@ def test_tick_with_llm_unavailable_fallback():
     assert "Apex Clinic" in actions[0]["body"]
     assert actions[0]["template_name"] == "template_compliance_alert_v1"
 
+
+def test_master_system_prompt_dynamic_variables_injection():
+    """Verify that build_system_prompt dynamically injects current_date, language_preference, locality, and business_name."""
+    from app.composer import build_system_prompt, MASTER_SYSTEM_PROMPT_TEMPLATE
+
+    ctx = {
+        "now": "2026-04-26T10:00:00Z",
+        "merchant": {
+            "name": "Dr. Meera Dental Clinic",
+            "locality": "Lajpat Nagar",
+            "languages": ["en", "hi"],
+        },
+        "customer": {
+            "name": "Priya",
+            "language_pref": "hi-en mix",
+        },
+    }
+
+    prompt = build_system_prompt(ctx)
+
+    # 1. Header is placed at the very top
+    assert prompt.startswith("SYSTEM INSTRUCTIONS FOR MERCHANT OUTREACH")
+
+    # 2. Dynamic variable substitution
+    assert "The current date is April 26, 2026." in prompt
+    assert "exact language format requested: hi-en mix" in prompt
+    assert "around Lajpat Nagar" in prompt
+    assert "ensure Dr. Meera Dental Clinic captures that local intent" in prompt
+
+    # 3. All 4 master evaluation rules are verbatim present
+    assert "1. Zero Hallucination & Strict Data Grounding" in prompt
+    assert "2. Smart Category Adaptation (Vocabulary Guardrails)" in prompt
+    assert "3. Strict Language Compliance" in prompt
+    assert "4. Grounded Urgency (The Hook)" in prompt
+
+    # 4. Fallback when merchant context is minimal
+    minimal_prompt = build_system_prompt({})
+    assert "SYSTEM INSTRUCTIONS FOR MERCHANT OUTREACH" in minimal_prompt
+    assert "exact language format requested: English" in minimal_prompt
+
+
+def test_compose_message_passes_dynamic_system_prompt():
+    """Ensure compose_message passes the dynamically generated system prompt to the LLM caller."""
+    captured_sys_prompt = []
+
+    def capturing_mock(user_prompt: str, system_prompt: str, timeout: float) -> str:
+        captured_sys_prompt.append(system_prompt)
+        return json.dumps({
+            "body": "Dr. Meera, Priya is due for recall check-up in Lajpat Nagar. Reply YES to dispatch invite.",
+            "cta": "open_ended",
+            "rationale": "Test rationale",
+        })
+
+    set_custom_llm_caller(capturing_mock)
+
+    ctx = {
+        "now": "2026-10-31T09:00:00Z",
+        "merchant": {
+            "name": "Dr. Meera Dental Clinic",
+            "locality": "Lajpat Nagar",
+            "languages": ["en", "hi"],
+        },
+        "customer": {
+            "name": "Priya",
+            "language_pref": "hi-en mix",
+        },
+    }
+    fallback = ("Fallback", "tmpl", [], "rat")
+    compose_message(ctx, fallback)
+
+    assert len(captured_sys_prompt) == 1
+    sys_p = captured_sys_prompt[0]
+    assert sys_p.startswith("SYSTEM INSTRUCTIONS FOR MERCHANT OUTREACH")
+    assert "The current date is October 31, 2026." in sys_p
+    assert "exact language format requested: hi-en mix" in sys_p
+
+
+def test_render_template_smart_category_adaptation_gym_chronic_refill():
+    """Verify that chronic_refill on gyms adapts to membership renewal and member terminology."""
+    from app.decision.templates import render_template
+
+    merchant = {
+        "identity": {"name": "Roshni Fitness Gym", "city": "Ahmedabad", "locality": "Navrangpura"},
+        "offers": [{"title": "Annual Gym Pass @ ₹9,999", "status": "active"}],
+        "category_slug": "gyms",
+    }
+    category = {"slug": "gyms", "display_name": "Gyms & Fitness"}
+    customer = {"identity": {"name": "Ira"}}
+    trigger = {
+        "id": "trg_082_chronic_refill_due_m_036_roshni_gym_ahm",
+        "kind": "chronic_refill_due",
+        "merchant_id": "m_036_roshni_gym_ahmedabad",
+        "customer_id": "c_142_ira",
+        "payload": {"placeholder": True, "metric_or_topic": "chronic_refill_due"},
+    }
+
+    body, tmpl, params, rationale = render_template(trigger, merchant, category, customer)
+
+    assert "Member Ira" in body
+    assert "membership renewal" in body
+    assert "workout streak" in body
+    assert "chronic" not in body.lower()
+    assert "refill" not in body.lower()
+
