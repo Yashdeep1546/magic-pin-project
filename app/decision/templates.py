@@ -42,7 +42,22 @@ def _render_research_knowledge(
     offer_str: str,
 ) -> Tuple[str, str, List[str], str]:
     if kind in ("regulation_change", "compliance_alert", "compliance") or "deadline_iso" in payload:
-        raw_reg = payload.get("topic") or payload.get("top_item_id")
+        raw_reg = payload.get("topic")
+        raw_top = str(payload.get("top_item_id") or "")
+        if not raw_reg or str(raw_reg).startswith("d_") or str(raw_reg).startswith("trg_"):
+            if "radiograph" in raw_top or "dci" in raw_top:
+                raw_reg = "DCI digital radiography guidelines"
+            elif "fluoride" in raw_top:
+                raw_reg = "clinical fluoride varnish protocol"
+            elif "antibiotic" in raw_top:
+                raw_reg = "antibiotic stewardship standards"
+            elif "fire" in raw_top or "safety" in raw_top:
+                raw_reg = "statutory safety inspection norms"
+            elif "fssai" in raw_top:
+                raw_reg = "FSSAI hygiene audit guidelines"
+            else:
+                clean_name = re.sub(r"^d_\d{4}W?\d*_", "", raw_top).replace("_", " ").strip()
+                raw_reg = f"updated {clean_name} guidelines" if clean_name else "updated regulatory guidelines"
         reg_topic = _clean_entity_text(raw_reg, "regulatory guidelines")
         body = (
             f"{m_name}, urgent regulatory update for {cat_name}: {reg_topic} takes effect soon. "
@@ -68,8 +83,16 @@ def _render_research_knowledge(
         raw_digest = (
             (top_item.get("title") if isinstance(top_item, dict) else None)
             or payload.get("title")
-            or payload.get("top_item_id")
         )
+        if not raw_digest or str(raw_digest).startswith("d_") or str(raw_digest).startswith("trg_"):
+            raw_top = str(payload.get("top_item_id") or "")
+            if "fluoride" in raw_top:
+                raw_digest = "fluoride varnish recall efficacy findings"
+            elif "radiograph" in raw_top:
+                raw_digest = "digital radiography diagnostic protocols"
+            else:
+                clean_name = re.sub(r"^d_\d{4}W?\d*_", "", raw_top).replace("_", " ").strip()
+                raw_digest = f"new {clean_name} findings" if clean_name else "actionable peer insights"
         digest_title = _clean_entity_text(raw_digest, "actionable peer insights")
         body = (
             f"{m_name}, this week's research digest for {cat_name} highlights: {digest_title}. "
@@ -186,7 +209,7 @@ def _render_recall_lapse(
         template_name = TEMPLATE_NAME_OVERRIDES.get(kind, "template_recall_lapse_v1")
         template_params = [m_name, str(slot_time)]
         rationale = f"Capacity optimization for unplanned open slot ({slot_time}) at {m_name}."
-    elif kind in ("recall_due", "chronic_refill_due"):
+    elif kind in ("recall_due", "chronic_refill_due", "regular_customer_re_engagement"):
         raw_cust = (
             customer.get("identity", {}).get("name") if isinstance(customer.get("identity"), dict) else customer.get("name")
         ) if customer else None

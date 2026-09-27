@@ -79,6 +79,26 @@ def process_tick(
             category = rc.category
             customer = rc.customer
 
+            # Intercept mismatched triggers in candidate scoring
+            trigger_kind = trigger.get("kind", "")
+            cat_slug = (category.get("slug") if isinstance(category, dict) else (merchant.get("category_slug") if isinstance(merchant, dict) else "")) or ""
+            if trigger_kind == "chronic_refill_due" and "pharm" not in cat_slug.lower():
+                trigger_kind = "regular_customer_re_engagement"
+                trigger["kind"] = "regular_customer_re_engagement"
+                if isinstance(trigger.get("payload"), dict) and trigger["payload"].get("metric_or_topic") == "chronic_refill_due":
+                    trigger["payload"]["metric_or_topic"] = "regular_customer_re_engagement"
+
+            # Check if customer object actually exists before scoring
+            has_valid_customer = bool(
+                customer
+                and isinstance(customer, dict)
+                and (customer.get("name") or (customer.get("identity", {}).get("name") if isinstance(customer.get("identity"), dict) else None))
+                and trigger.get("scope") != "merchant"
+            )
+            if not has_valid_customer:
+                customer = None
+                rc.customer = None
+
             score = score_trigger(trigger, merchant, category, customer, now=now)
             if score > 0:
                 candidate_items.append({
@@ -120,8 +140,30 @@ def process_tick(
             c = rc.category
             cust = rc.customer
 
+            # Intercept and rewrite mismatched triggers before template and composer
+            trigger_kind = trg.get("kind", "")
+            cat_slug = (c.get("slug") if isinstance(c, dict) else (m.get("category_slug") if isinstance(m, dict) else "")) or ""
+            if trigger_kind == "chronic_refill_due" and "pharm" not in cat_slug.lower():
+                trigger_kind = "regular_customer_re_engagement"
+                trg["kind"] = "regular_customer_re_engagement"
+                if isinstance(trg.get("payload"), dict) and trg["payload"].get("metric_or_topic") == "chronic_refill_due":
+                    trg["payload"]["metric_or_topic"] = "regular_customer_re_engagement"
+
+            # Check if customer object actually exists before building that part
+            has_cust = bool(
+                cust
+                and isinstance(cust, dict)
+                and (cust.get("name") or (cust.get("identity", {}).get("name") if isinstance(cust.get("identity"), dict) else None))
+                and trg.get("scope") != "merchant"
+            )
+            if not has_cust:
+                cust = None
+                rc.customer = None
+                cust_id = None
+            else:
+                cust_id = trg.get("customer_id")
+
             m_id = trg.get("merchant_id") or "unknown_merchant"
-            cust_id = trg.get("customer_id")
             trg_id = trg.get("id")
             sup_key = trg.get("suppression_key")
 

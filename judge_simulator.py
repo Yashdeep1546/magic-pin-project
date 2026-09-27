@@ -600,20 +600,36 @@ Score each dimension 0-10 with clear reasoning. Be STRICT."""
         if not match:
             return self._fallback_score(action)
 
+        def _safe_int(val: Any, default: int = 5) -> int:
+            if val is None:
+                return default
+            if isinstance(val, (int, float)):
+                return int(round(float(val)))
+            if isinstance(val, str):
+                m = re.search(r'(\d+(?:\.\d+)?)', val)
+                if m:
+                    try:
+                        return int(round(float(m.group(1))))
+                    except Exception:
+                        pass
+            return default
+
         try:
             data = json.loads(match.group())
             result = ScoreResult(
-                specificity=min(10, max(0, int(data.get("specificity", 5)))),
-                specificity_reason=data.get("specificity_reason", ""),
-                category_fit=min(10, max(0, int(data.get("category_fit", 5)))),
-                category_fit_reason=data.get("category_fit_reason", ""),
-                merchant_fit=min(10, max(0, int(data.get("merchant_fit", 5)))),
-                merchant_fit_reason=data.get("merchant_fit_reason", ""),
-                decision_quality=min(10, max(0, int(data.get("decision_quality", data.get("trigger_relevance", 5))))),
-                decision_quality_reason=data.get("decision_quality_reason", data.get("trigger_relevance_reason", "")),
-                engagement_compulsion=min(10, max(0, int(data.get("engagement_compulsion", 5)))),
-                engagement_reason=data.get("engagement_reason", ""),
-                hint=data.get("hint", "")
+                specificity=min(10, max(0, _safe_int(data.get("specificity"), 5))),
+                specificity_reason=str(data.get("specificity_reason", "")),
+                category_fit=min(10, max(0, _safe_int(data.get("category_fit"), 5))),
+                category_fit_reason=str(data.get("category_fit_reason", "")),
+                merchant_fit=min(10, max(0, _safe_int(data.get("merchant_fit"), 5))),
+                merchant_fit_reason=str(data.get("merchant_fit_reason", "")),
+                decision_quality=min(10, max(0, _safe_int(data.get("decision_quality", data.get("trigger_relevance")), 5))),
+                decision_quality_reason=str(data.get("decision_quality_reason", data.get("trigger_relevance_reason", ""))),
+                engagement_compulsion=min(10, max(0, _safe_int(data.get("engagement_compulsion"), 5))),
+                engagement_reason=str(data.get("engagement_reason", "")),
+                penalties=_safe_int(data.get("penalties"), 0),
+                penalty_reasons=data.get("penalty_reasons", []) if isinstance(data.get("penalty_reasons"), list) else [],
+                hint=str(data.get("hint", ""))
             )
             return result
         except Exception as e:

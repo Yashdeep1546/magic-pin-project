@@ -121,7 +121,7 @@ def _build_base_system_prompt(has_customer: bool = False, cust_name: Optional[st
     else:
         customer_rule = (
             f"   - Always address the merchant owner by their first name (use 'Dr. [FirstName]' for dentists).\n"
-            f"   - No specific customer data was provided for this trigger. Address the merchant's customer base generally (e.g., 'your regular diners' or 'lapsed members'). NEVER invent a customer name or specific visit date.\n"
+            f"   - No specific customer data was provided for this trigger. Address the merchant's customer base generally (e.g., 'your regular diners' or 'lapsed members'). NO SPECIFIC CUSTOMER. NEVER invent a customer name or visit date.\n"
             f"   - Reference their specific locality (e.g. '{locality}').\n"
             f"   - Tie in their active offer with exact price or active performance metrics.\n"
             f"   - Do NOT expose internal technical jargon (avoid terms like 'cohort signals', 'internal metric', 'algorithm'). Speak natural business and clinical language."
@@ -439,6 +439,13 @@ def build_compact_context(
     raw_t_payload = t.get("payload") if isinstance(t.get("payload"), dict) else {}
     t_payload = sanitize_untrusted(raw_t_payload) if isinstance(raw_t_payload, dict) else {}
 
+    # Intercept and rewrite mismatched triggers in Python:
+    # If it's a pharmacy trigger sent to a non-pharmacy, rename the intent
+    if t_kind == "chronic_refill_due" and "pharm" not in cat_slug.lower():
+        t_kind = "regular_customer_re_engagement"
+        if isinstance(t_payload, dict) and t_payload.get("metric_or_topic") == "chronic_refill_due":
+            t_payload["metric_or_topic"] = "regular_customer_re_engagement"
+
     # Match relevant digest item for research / compliance / educational triggers
     matched_digest: Optional[Dict[str, Any]] = None
     digests = c.get("digest") if isinstance(c.get("digest"), list) else []
@@ -474,13 +481,39 @@ def build_compact_context(
             "actionable": sanitize_text(matched_digest.get("actionable")),
         }
 
-    # 7. Customer Context (if scope=customer)
+    # 7. Customer Context (Hard Python logic to physically hide when None)
+    t_scope = t.get("scope")
     cust_identity = cust.get("identity") if isinstance(cust.get("identity"), dict) else {}
-    cust_name = sanitize_text(cust_identity.get("name") or cust.get("name")) if cust else None
-    cust_lang = sanitize_text(cust_identity.get("language_pref")) if cust else None
-    cust_rel = sanitize_untrusted(cust.get("relationship")) if isinstance(cust.get("relationship"), dict) else {}
-    cust_state = sanitize_text(cust.get("state")) if cust else None
-    cust_pref = sanitize_untrusted(cust.get("preferences")) if isinstance(cust.get("preferences"), dict) else {}
+    raw_cust_name = cust_identity.get("name") or cust.get("name")
+
+    if cust and raw_cust_name and str(raw_cust_name).lower() not in ("none", "null", "unknown", "your customer"):
+        cust_name = sanitize_text(raw_cust_name)
+        cust_lang = sanitize_text(cust_identity.get("language_pref"))
+        cust_rel = sanitize_untrusted(cust.get("relationship")) if isinstance(cust.get("relationship"), dict) else {}
+        cust_state = sanitize_text(cust.get("state"))
+        cust_pref = sanitize_untrusted(cust.get("preferences")) if isinstance(cust.get("preferences"), dict) else {}
+        c_last = cust_rel.get("last_visit") or cust.get("last_visit")
+        if c_last:
+            customer_context = f"Customer Name: {cust_name}, Last Visit: {c_last}"
+        else:
+            customer_context = f"Customer Name: {cust_name}"
+        customer_obj = {
+            "name": cust_name,
+            "last_visit": c_last,
+            "language_pref": cust_lang,
+            "state": cust_state,
+            "relationship": cust_rel,
+            "preferences": cust_pref,
+        }
+    else:
+        cust = None
+        cust_name = None
+        cust_lang = None
+        cust_rel = {}
+        cust_state = None
+        cust_pref = {}
+        customer_obj = None
+        customer_context = "NO SPECIFIC CUSTOMER. Address the merchant's general audience. NEVER invent a customer name or visit date."
 
     # 8. Construct Allowed Facts List
     allowed_facts = [
@@ -550,7 +583,7 @@ def build_compact_context(
             allowed_facts.append(f"Actionable takeaway: {digest_dict['actionable']}")
 
     # Customer-facing details
-    if cust_name:
+    if customer_obj and cust_name:
         allowed_facts.append(f"Customer name: {cust_name}")
     if cust_lang:
         allowed_facts.append(f"Customer language preference: {cust_lang}")
@@ -564,6 +597,8 @@ def build_compact_context(
         allowed_facts.append(f"Services received: {', '.join(cust_rel['services_received'])}")
     if cust_pref.get("preferred_slots"):
         allowed_facts.append(f"Preferred slots: {cust_pref['preferred_slots']}")
+    else:
+        allowed_facts.append(customer_context)
 
     # Trigger payload facts via generic walker
     if t_kind:
@@ -604,10 +639,10 @@ def build_compact_context(
         "Do not mention internal system concepts, trigger IDs, or scoring rules.",
     ]
 
-    if not cust_name:
-        allowed_facts.append("No specific customer data was provided for this trigger. Address customer base generally.")
+    if not customer_obj:
         forbidden_claims.extend([
             "No specific customer data was provided for this trigger. Address the merchant's customer base generally (e.g., 'your regular diners' or 'lapsed members'). NEVER invent a customer name or specific visit date.",
+            "NO SPECIFIC CUSTOMER. Address the merchant's general audience. NEVER invent a customer name or visit date.",
             "Do not invent any customer visit dates, past visit histories, or fabricated counts (e.g., do NOT invent '1,564 unique members' or similar counts).",
         ])
 
@@ -617,6 +652,10 @@ def build_compact_context(
 
     now_val = now or (getattr(rc, "metadata", {}) or {}).get("now") if rc else None
     now_val = now_val or (t.get("created_at") if isinstance(t, dict) else None) or (t.get("timestamp") if isinstance(t, dict) else None)
+
+    filtered_cust_agg = dict(cust_agg) if isinstance(cust_agg, dict) else {}
+    if t_kind not in ("milestone", "milestone_reached"):
+        filtered_cust_agg.pop("total_unique_ytd", None)
 
     return {
         "now": now_val,
@@ -634,7 +673,7 @@ def build_compact_context(
                 "leads": m_leads,
                 "delta_7d": delta_7d,
             },
-            "customer_aggregate": cust_agg,
+            "customer_aggregate": filtered_cust_agg,
             "signals": signals,
             "active_offers": active_offers,
         },
@@ -653,13 +692,8 @@ def build_compact_context(
             "urgency": t_urgency,
             "details": t_payload,
         },
-        "customer": {
-            "name": cust_name,
-            "language_pref": cust_lang,
-            "state": cust_state,
-            "relationship": cust_rel,
-            "preferences": cust_pref,
-        } if cust_name else None,
+        "customer": customer_obj,
+        "customer_context": customer_context,
         "selected_signal": selected_signal or t_kind,
         "category_voice_policy": voice_policy_str,
         "allowed_facts": allowed_facts,
@@ -754,11 +788,45 @@ def compose_message(
     """
     fallback_body, fallback_template, fallback_params, fallback_rationale = fallback_data
 
-    cust = compact_context.get("customer") or {}
-    has_customer = bool(cust and isinstance(cust, dict) and (cust.get("name") or (cust.get("identity", {}).get("name") if isinstance(cust.get("identity"), dict) else None)))
+    # 1. Kill the Hardcoded Date & Ghost Customers
+    # Check if the customer object actually exists before building that part of the prompt
+    customer = compact_context.get("customer")
+    if customer and isinstance(customer, dict) and (customer.get("name") or (customer.get("identity", {}).get("name") if isinstance(customer.get("identity"), dict) else None)):
+        c_name = customer.get("name") or (customer.get("identity", {}).get("name") if isinstance(customer.get("identity"), dict) else None)
+        c_last = customer.get("last_visit") or (customer.get("relationship", {}).get("last_visit") if isinstance(customer.get("relationship"), dict) else None)
+        if c_last:
+            customer_context = f"Customer Name: {c_name}, Last Visit: {c_last}"
+        else:
+            customer_context = f"Customer Name: {c_name}"
+        has_customer = True
+    else:
+        customer = None
+        compact_context["customer"] = None
+        customer_context = "NO SPECIFIC CUSTOMER. Address the merchant's general audience. NEVER invent a customer name or visit date."
+        has_customer = False
+
+    # 2. Intercept and Rewrite Mismatched Triggers in Python
+    t = compact_context.get("trigger") or {}
+    m = compact_context.get("merchant") or {}
+    c_cat = compact_context.get("category") or {}
+    trigger_kind = t.get("kind", "")
+    category = (
+        m.get("category", "")
+        or c_cat.get("slug", "")
+        or m.get("category_slug", "")
+    )
+    if isinstance(category, dict):
+        category = category.get("slug", "")
+
+    # If it's a pharmacy trigger sent to a non-pharmacy, rename the intent
+    if trigger_kind == "chronic_refill_due" and category not in ("pharmacies", "pharmacy"):
+        trigger_kind = "regular_customer_re_engagement" # Make it generic
+        t["kind"] = trigger_kind
+        compact_context["selected_signal"] = trigger_kind
+        if isinstance(t.get("details"), dict) and t["details"].get("metric_or_topic") == "chronic_refill_due":
+            t["details"]["metric_or_topic"] = "regular_customer_re_engagement"
 
     # Determine dynamic language_preference for user_prompt recency bias enforcement
-    t = compact_context.get("trigger") or {}
     t_details = t.get("details") or t.get("payload") or {}
     payload_lang = (
         t_details.get("language_pref")
@@ -767,11 +835,10 @@ def compose_message(
         or t_details.get("customer_language")
     )
     cust_lang = (
-        (cust.get("language_pref") if isinstance(cust, dict) else None)
-        or (cust.get("identity", {}).get("language_pref") if isinstance(cust.get("identity"), dict) else None)
+        (customer.get("language_pref") if isinstance(customer, dict) else None)
+        or (customer.get("identity", {}).get("language_pref") if isinstance(customer, dict) and isinstance(customer.get("identity"), dict) else None)
         or payload_lang
     )
-    m = compact_context.get("merchant") or {}
     m_langs = m.get("languages") or []
     if cust_lang:
         c_str = str(cust_lang).strip()
@@ -802,14 +869,14 @@ def compose_message(
         "<untrusted_context_data>\n"
         f"{json.dumps(compact_context, indent=2)}\n"
         "</untrusted_context_data>\n\n"
+        f"TRIGGER INTENT: {trigger_kind}\n"
+        f"CUSTOMER CONTEXT:\n{customer_context}\n\n"
         "Compose the WhatsApp message following the system instructions and allowed facts."
     )
 
     if not has_customer:
         user_prompt += (
-            "\n\nCRITICAL CUSTOMER GROUNDING: No specific customer data was provided for this trigger. "
-            "Address the merchant's customer base generally (e.g., 'your regular diners' or 'lapsed members'). "
-            "NEVER invent a customer name or specific visit date."
+            f"\n\nCRITICAL CUSTOMER GROUNDING: No specific customer data was provided for this trigger. {customer_context}"
         )
 
     user_prompt += (
@@ -841,6 +908,18 @@ def compose_message(
             return fallback_data
 
         body = body.strip()
+        # Clean rogue markdown code fences, quotes, and conversational prefaces that LLM might output
+        if body.startswith("```") and body.endswith("```"):
+            body = re.sub(r"^```[a-zA-Z]*\n?|\n?```$", "", body).strip()
+        if (body.startswith('"') and body.endswith('"')) or (body.startswith("'") and body.endswith("'")):
+            body = body[1:-1].strip()
+        body = re.sub(
+            r"^(?:Here\s+(?:is|are)\s+(?:the\s+)?(?:WhatsApp\s+)?message\s*:\s*|Message\s*:\s*)",
+            "",
+            body,
+            flags=re.IGNORECASE,
+        ).strip()
+
         cta_val = data.get("cta")
         from app.output_validator import count_ctas
         if cta_val and isinstance(cta_val, str) and cta_val.strip():
@@ -878,3 +957,95 @@ def compose_message(
     except Exception as exc:
         logger.warning(f"LLM composition failed ({exc}); using deterministic fallback.")
         return fallback_data
+
+
+def compose(
+    category: Any = None,
+    merchant: Any = None,
+    trigger: Any = None,
+    customer: Any = None,
+    fallback_data: Optional[Tuple[str, str, List[str], str]] = None,
+    conversation_store: Optional[Any] = None,
+    conversation_id: Optional[str] = None,
+    **kwargs: Any,
+) -> Any:
+    """
+    Unified compose function supporting both:
+    1. Internal pipeline signature: compose(compact_context: dict, fallback_data: tuple, ...) -> tuple
+    2. Challenge brief signature: compose(category: dict, merchant: dict, trigger: dict, customer: dict | None) -> dict
+    """
+    # 1. Internal pipeline signature check: compact_context passed as first argument
+    if isinstance(category, dict) and ("merchant" in category or "now" in category) and fallback_data is not None:
+        return compose_message(
+            compact_context=category,
+            fallback_data=fallback_data,
+            conversation_store=conversation_store,
+            conversation_id=conversation_id,
+        )
+
+    # 2. Challenge brief signature: compose(category, merchant, trigger, customer)
+    cat_dict = category if isinstance(category, dict) else {}
+    merch_dict = merchant if isinstance(merchant, dict) else {}
+    trg_dict = dict(trigger) if isinstance(trigger, dict) else {}
+    cust_dict = customer if isinstance(customer, dict) else None
+
+    # Intercept and rewrite mismatched triggers in Python
+    trigger_kind = trg_dict.get("kind", "")
+    cat_val = merch_dict.get("category", "") or cat_dict.get("slug", "") or merch_dict.get("category_slug", "")
+    if isinstance(cat_val, dict):
+        cat_val = cat_val.get("slug", "")
+    if trigger_kind == "chronic_refill_due" and cat_val not in ("pharmacies", "pharmacy"):
+        trigger_kind = "regular_customer_re_engagement"
+        trg_dict["kind"] = trigger_kind
+        if isinstance(trg_dict.get("payload"), dict) and trg_dict["payload"].get("metric_or_topic") == "chronic_refill_due":
+            trg_dict["payload"] = dict(trg_dict["payload"])
+            trg_dict["payload"]["metric_or_topic"] = "regular_customer_re_engagement"
+
+    # Kill hardcoded date & ghost customers
+    if cust_dict and (cust_dict.get("name") or cust_dict.get("identity", {}).get("name")):
+        c_name = cust_dict.get("name") or cust_dict.get("identity", {}).get("name")
+        c_last = cust_dict.get("last_visit") or cust_dict.get("relationship", {}).get("last_visit")
+        if c_last:
+            customer_context = f"Customer Name: {c_name}, Last Visit: {c_last}"
+        else:
+            customer_context = f"Customer Name: {c_name}"
+        active_customer = cust_dict
+    else:
+        active_customer = None
+        customer_context = "NO SPECIFIC CUSTOMER. Address the merchant's general audience. NEVER invent a customer name or visit date."
+
+    compact = build_compact_context(
+        merchant=merch_dict,
+        category=cat_dict,
+        trigger=trg_dict,
+        customer=active_customer,
+    )
+    compact["customer_context"] = customer_context
+
+    # Render fallback deterministic template
+    from app.decision.templates import render_template
+    from app.models import ResolvedContext
+    rc = ResolvedContext(
+        trigger=trg_dict,
+        merchant=merch_dict,
+        category=cat_dict,
+        customer=active_customer,
+    )
+    fallback = render_template(rc)
+
+    body, tmpl, params, rationale = compose_message(
+        compact_context=compact,
+        fallback_data=fallback,
+        conversation_store=conversation_store,
+        conversation_id=conversation_id,
+    )
+
+    sup_key = trg_dict.get("suppression_key") or f"{trigger_kind}:{merch_dict.get('merchant_id')}:gen"
+    return {
+        "body": body,
+        "cta": "open_ended",
+        "send_as": "vera",
+        "suppression_key": sup_key,
+        "rationale": rationale,
+    }
+

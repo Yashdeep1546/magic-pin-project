@@ -499,6 +499,7 @@ TRIGGER_ALIASES: Dict[str, str] = {
 
     # Recall / Winback aliases
     "winback": "customer_winback",
+    "regular_customer_re_engagement": "recall_due",
 }
 
 
