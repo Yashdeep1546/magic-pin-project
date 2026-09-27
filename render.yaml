@@ -1,5 +1,5 @@
 # =============================================================================
-# Render Blueprint Specification - Magicpin Vera Bot (Root Repository)
+# Render Blueprint Specification - Magicpin Vera Bot
 # =============================================================================
 # CRITICAL ARCHITECTURAL REQUIREMENT:
 # ContextStore and ConversationStore in app/store.py are in-memory and process-local.
@@ -12,8 +12,8 @@ services:
   - type: web
     name: magicpin-vera-bot
     runtime: docker
-    dockerfilePath: ./magicpin-bot/Dockerfile
-    dockerContext: ./magicpin-bot
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
     plan: starter
     region: oregon
     
@@ -46,6 +46,6 @@ services:
       - key: LLM_TIMEOUT_SECONDS
         value: "8.0"
       - key: OPENAI_API_KEY
-        sync: false
+        sync: false # Set via Render Dashboard Environment tab
       - key: GEMINI_API_KEY
-        sync: false
+        sync: false # Set via Render Dashboard Environment tab

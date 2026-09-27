@@ -73,7 +73,7 @@ if hasattr(sys.stderr, "reconfigure"):
 import time
 import re
 import socket
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple
 from pathlib import Path
@@ -85,6 +85,8 @@ TIMEOUT_LLM = 45
 DATASET_PATH = os.environ.get("DATASET_DIR", "")
 if DATASET_PATH and Path(DATASET_PATH).exists():
     DATASET_DIR = Path(DATASET_PATH)
+elif (Path(__file__).parent / "dataset").exists():
+    DATASET_DIR = Path(__file__).parent / "dataset"
 elif (Path(__file__).parent / "magicpin-bot" / "dataset").exists():
     DATASET_DIR = Path(__file__).parent / "magicpin-bot" / "dataset"
 else:
@@ -459,6 +461,9 @@ class BotClient:
         except Exception as e:
             return None, str(e), (time.time() - start) * 1000
 
+    def teardown(self):
+        return self._request("POST", "/v1/teardown", 5, {})
+
     def healthz(self):
         return self._request("GET", "/v1/healthz", 5)
 
@@ -468,7 +473,7 @@ class BotClient:
     def push_context(self, scope, cid, version, payload):
         return self._request("POST", "/v1/context", 10, {
             "scope": scope, "context_id": cid, "version": version,
-            "payload": payload, "delivered_at": datetime.utcnow().isoformat() + "Z"
+            "payload": payload, "delivered_at": datetime.now(timezone.utc).isoformat()
         })
 
     def tick(self, triggers):
@@ -482,7 +487,7 @@ class BotClient:
         return self._request("POST", "/v1/reply", 15, {
             "conversation_id": conv_id, "merchant_id": merchant_id, "customer_id": None,
             "from_role": "merchant", "message": message,
-            "received_at": datetime.utcnow().isoformat() + "Z", "turn_number": turn
+            "received_at": datetime.now(timezone.utc).isoformat(), "turn_number": turn
         })
 
 # =============================================================================
@@ -676,6 +681,9 @@ class JudgeSimulator:
 
     def _warmup(self) -> bool:
         print_section("WARMUP")
+
+        # Reset bot state before running test suite to prevent stale suppression and duplicate turn issues
+        self.client.teardown()
 
         data, err, lat = self.client.healthz()
         if err:
